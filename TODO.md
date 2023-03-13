@@ -1,0 +1,7 @@
+- [x] Add debug parameter in `create_mask` to either show images in debug mode
+- [x] Save images from `create_mask` to `Images_Processed`
+- [x] Create a script that takes `Images_Processed` images and compares a Naive Bayes image with its corresponding ground truth and returns the metric scores and stores it in a csv file
+- [ ] Convert all the files to functions to be used as a pipeline
+- [x] Create a pipeline to do the Naive Bayes Baseline task
+- [x] Change labels in label studio to albedo from albedo out
+- [x] Generate a aggregated result data for baseline

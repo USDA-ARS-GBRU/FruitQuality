@@ -1,0 +1,9 @@
+plantcv
+tensorflow
+numpy
+matplolib
+pandas
+opencv-python
+segmentation_models
+jupyterlab
+albumentations
