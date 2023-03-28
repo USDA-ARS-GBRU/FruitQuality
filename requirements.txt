@@ -1,9 +1,13 @@
-plantcv
+# Conda install
 tensorflow
 numpy
 matplolib
 pandas
+jupyterlab
+plantcv
+
+# Pip install
 opencv-python
 segmentation_models
-jupyterlab
 albumentations
+wandb
