@@ -9,8 +9,8 @@ import wandb
 import segmentation_models as sm
 import albumentations as A
 
-wandb.init(project="my-awesome-project")
-# wandb.init(project="fruit-quality")
+# wandb.init(project="my-awesome-project")
+wandb.init(project="fruit-quality")
 
 
 DATA_DIR = './Images/'
@@ -211,14 +211,15 @@ BACKBONE = 'efficientnetb0'
 BATCH_SIZE = 1
 CLASSES = ['seed', 'pulp', 'albedo', 'flavedo']
 LR = 0.0001
-EPOCHS = 2
+EPOCHS = 40
 ARCHITECTURE = sm.Linknet
+ARCHITECTURE_TXT = "Linknet"
 
 preprocess_input = sm.get_preprocessing(BACKBONE)
 
 
 wandb.config.update({"epochs": EPOCHS, "lr": LR, "backbone": BACKBONE,
-                    "architecture": "Linknet", "activation": "softmax"})
+                    "architecture": ARCHITECTURE_TXT, "activation": "softmax"})
 
 
 # define network parameters
@@ -331,27 +332,6 @@ history = model.fit(
 )
 
 
-# Plot training & validation iou_score values
-plt.figure(figsize=(30, 5))
-plt.subplot(121)
-plt.plot(history.history['iou_score'])
-plt.plot(history.history['val_iou_score'])
-plt.title('Model iou_score')
-plt.ylabel('iou_score')
-plt.xlabel('Epoch')
-plt.legend(['Train', 'Val'], loc='upper left')
-
-# Plot training & validation loss values
-plt.subplot(122)
-plt.plot(history.history['loss'])
-plt.plot(history.history['val_loss'])
-plt.title('Model loss')
-plt.ylabel('Loss')
-plt.xlabel('Epoch')
-plt.legend(['Train', 'Val'], loc='upper left')
-plt.show()
-
-
 # test_dataset = Dataset(
 #     DATA_DIR,
 #     MASK_DIR,
@@ -360,7 +340,7 @@ plt.show()
 
 test_dataloader = Dataloder(test_dataset, batch_size=1, shuffle=False)
 # load best weights
-# model.load_weights('best_model.h5')
+# model.load_weights('keras_checkpoints/best_model_40')
 scores = model.evaluate(test_dataloader)
 
 print("Loss: {:.5}".format(scores[0]))
@@ -376,50 +356,6 @@ image = wandb.Image(dataset_image,
                         "class_labels": class_labels
                     }}, caption="Masks Predicted")
 wandb.log({"example_image": image})
-
-
-# n = 5
-# ids = np.random.choice(np.arange(len(test_dataset)), size=n)
-
-# for i in ids:
-
-#     image, gt_mask = test_dataset[i]
-#     image = np.expand_dims(image, axis=0)
-#     pr_mask = model.predict(image)
-
-#     max_channel_mask = np.argmax(pr_mask, axis=-1)
-#     sharper_seed_mask = np.zeros_like(max_channel_mask)
-#     sharper_pulp_mask = np.zeros_like(max_channel_mask)
-#     sharper_albedo_mask = np.zeros_like(max_channel_mask)
-#     sharper_flavedo_mask = np.zeros_like(max_channel_mask)
-#     sharper_background_mask = np.zeros_like(max_channel_mask)
-#     sharper_seed_mask[max_channel_mask == 0] = 1
-#     sharper_pulp_mask[max_channel_mask == 1] = 1
-#     sharper_albedo_mask[max_channel_mask == 2] = 1
-#     sharper_flavedo_mask[max_channel_mask == 3] = 1
-#     sharper_background_mask[max_channel_mask == 4] = 1
-
-#     visualize(
-#         3,
-#         image=image.squeeze(),
-#         seed_mask=gt_mask[..., 0].squeeze(),
-#         pulp_mask=gt_mask[..., 1].squeeze(),
-#         albedo_mask=gt_mask[..., 2].squeeze(),
-#         flavedo_mask=gt_mask[..., 3].squeeze(),
-#         background_mask=gt_mask[..., 4].squeeze(),
-#         image_dup=image.squeeze(),
-#         pr_seed_mask=pr_mask[..., 0].squeeze(),
-#         pr_pulp_mask=pr_mask[..., 1].squeeze(),
-#         pr_albedo_mask=pr_mask[..., 2].squeeze(),
-#         pr_flavedo_mask=pr_mask[..., 3].squeeze(),
-#         pr_background_mask=pr_mask[..., 4].squeeze(),
-#         image_dup_dup=image.squeeze(),
-#         pr_seed_mask_dup=sharper_seed_mask.squeeze(),
-#         pr_pulp_mask_dup=sharper_pulp_mask.squeeze(),
-#         pr_albedo_mask_dup=sharper_albedo_mask.squeeze(),
-#         pr_flavedo_mask_dup=sharper_flavedo_mask.squeeze(),
-#         pr_background_mask_dup=sharper_background_mask.squeeze(),
-#     )
 
 
 wandb.finish()
