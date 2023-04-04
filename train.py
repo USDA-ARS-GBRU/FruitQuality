@@ -1,15 +1,19 @@
-from wandb.keras import WandbEvalCallback, WandbMetricsLogger
+# autopep8: off
 import os
+os.environ['SM_FRAMEWORK'] = 'tf.keras'
+# autopep8: on
+
 import cv2
 import keras
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import wandb
-import segmentation_models as sm
 import albumentations as A
+import segmentation_models as sm
+import wandb
 
-# wandb.init(project="my-awesome-project")
+
+# wandb.init(project="my-awesome-project", mode="offline")
 wandb.init(project="fruit-quality")
 
 
@@ -208,7 +212,7 @@ def get_preprocessing(preprocessing_fn):
 
 
 BACKBONE = 'efficientnetb0'
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 CLASSES = ['seed', 'pulp', 'albedo', 'flavedo']
 LR = 0.0001
 EPOCHS = 40
@@ -219,7 +223,8 @@ preprocess_input = sm.get_preprocessing(BACKBONE)
 
 
 wandb.config.update({"epochs": EPOCHS, "lr": LR, "backbone": BACKBONE,
-                    "architecture": ARCHITECTURE_TXT, "activation": "softmax"})
+                    "architecture": ARCHITECTURE_TXT, "activation": "softmax", 
+                    "batch_size": BATCH_SIZE})
 
 
 # define network parameters

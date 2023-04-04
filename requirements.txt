@@ -1,13 +1,15 @@
 # Conda install
-tensorflow
 numpy
 matplolib
 pandas
 jupyterlab
 plantcv
+cudatoolkit=11.8.0 # -c conda-forge
 
 # Pip install
 opencv-python
 segmentation_models
 albumentations
 wandb
+tensorflow
+nvidia-cudnn-cu11==8.6.0.163 # linux package
