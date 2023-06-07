@@ -367,7 +367,7 @@ image = wandb.Image(dataset_image,
                     }}, caption="Masks Predicted")
 wandb.log({"example_image": image})
 
-model_dir = "keras_checkpoints/full_model"
+model_dir = f"keras_checkpoints/{wandb.run.name}_model"
 model.save(model_dir)
 artifact = wandb.Artifact(name=f'{wandb.run.name}_model', type='model')
 artifact.add_dir(model_dir)
