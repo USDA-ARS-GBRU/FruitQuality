@@ -231,12 +231,13 @@ wandb.config.update({"epochs": EPOCHS, "lr": LR, "backbone": BACKBONE,
 n_classes = len(CLASSES) + 1
 activation = 'softmax'
 
-# create model
-model = ARCHITECTURE(BACKBONE, classes=n_classes, activation=activation)
+with tf.distribute.MirroredStrategy(['/GPU:0']).scope():
+    # create model
+    model = ARCHITECTURE(BACKBONE, classes=n_classes, activation=activation)
 
 
-# define optomizer
-optim = keras.optimizers.Adam(LR)
+    # define optomizer
+    optim = keras.optimizers.Adam(LR)
 
 # Segmentation models losses can be combined together by '+' and scaled by integer or float factor
 # set class weights for dice_loss (car: 1.; pedestrian: 2.; background: 0.5;)
@@ -317,9 +318,11 @@ train_dataloader = Dataloder(
 valid_dataloader = Dataloder(valid_dataset, batch_size=1, shuffle=False)
 
 # define callbacks for learning rate scheduling and best checkpoints saving
+checkpoint_path = './keras_checkpoints/best_model_{epoch:02d}'
+checkpoint_dir = os.path.dirname(checkpoint_path)
 callbacks = [
-    wandb.keras.WandbModelCheckpoint(
-        './keras_checkpoints/best_model_{epoch:02d}', save_weights_only=True, save_best_only=True),
+    keras.callbacks.ModelCheckpoint(
+        checkpoint_path, save_weights_only=True, save_best_only=True),
     keras.callbacks.ReduceLROnPlateau(),
     wandb.keras.WandbMetricsLogger(),
     PlotSampleImages()
@@ -345,7 +348,9 @@ history = model.fit(
 
 test_dataloader = Dataloder(test_dataset, batch_size=1, shuffle=False)
 # load best weights
-# model.load_weights('keras_checkpoints/best_model_40')
+latest = tf.train.latest_checkpoint(checkpoint_dir)
+scores = model.evaluate(test_dataloader)
+model.load_weights(latest)
 scores = model.evaluate(test_dataloader)
 
 print("Loss: {:.5}".format(scores[0]))
@@ -362,5 +367,10 @@ image = wandb.Image(dataset_image,
                     }}, caption="Masks Predicted")
 wandb.log({"example_image": image})
 
+model_dir = "keras_checkpoints/full_model"
+model.save(model_dir)
+artifact = wandb.Artifact(name=f'{wandb.run.name}_model', type='model')
+artifact.add_dir(model_dir)
+wandb.run.log_artifact(artifact)
 
 wandb.finish()
