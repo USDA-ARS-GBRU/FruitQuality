@@ -2,8 +2,6 @@ import os
 os.environ['SM_FRAMEWORK'] = 'tf.keras'
 import wandb
 import segmentation_models as sm
-import albumentations as A
-import matplotlib.pyplot as plt
 import tensorflow as tf
 import numpy as np
 import keras
@@ -156,8 +154,8 @@ class Dataloder(keras.utils.Sequence):
 api = wandb.Api()
 artifact = api.artifact('mresham/my-awesome-project/clean-cosmos-7_model:v0')
 artifact.download()
-path = "artifacts/clean-cosmos-7_model:v0"
-model = tf.keras.saving.load_model(path, compile=False)
+path = "artifacts/clean-cosmos-7_model-v0"
+model = tf.keras.models.load_model(path, compile=False)
 
 DATA_DIR = './Images/'
 MASK_DIR = './Masks/'
