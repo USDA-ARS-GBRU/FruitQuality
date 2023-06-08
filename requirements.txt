@@ -12,4 +12,5 @@ segmentation_models
 albumentations
 wandb
 tensorflow
+tensorflow-directml-plugin # windows
 nvidia-cudnn-cu11==8.6.0.163 # linux package
