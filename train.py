@@ -3,6 +3,7 @@ import os
 os.environ['SM_FRAMEWORK'] = 'tf.keras'
 # autopep8: on
 
+import yaml
 import cv2
 import keras
 import numpy as np
@@ -13,8 +14,11 @@ import segmentation_models as sm
 import wandb
 
 
-# wandb.init(project="my-awesome-project", mode="offline")
-wandb.init(project="fruit-quality")
+with open('./config.yaml') as file:
+    config = yaml.load(file, Loader=yaml.FullLoader)
+
+run = wandb.init(config=config)
+
 
 
 DATA_DIR = './Images/'
@@ -211,13 +215,17 @@ def get_preprocessing(preprocessing_fn):
     return A.Compose(_transform)
 
 
-BACKBONE = 'efficientnetb0'
-BATCH_SIZE = 4
+BACKBONE = wandb.config.backbone
+BATCH_SIZE = wandb.config.batch_size
 CLASSES = ['seed', 'pulp', 'albedo', 'flavedo']
 LR = 0.0001
-EPOCHS = 40
-ARCHITECTURE = sm.Linknet
-ARCHITECTURE_TXT = "Linknet"
+EPOCHS = wandb.config.epochs
+ARCHITECTURE_TXT = wandb.config.architecture
+
+if ARCHITECTURE_TXT == "Linknet":
+    ARCHITECTURE = sm.Linknet
+elif ARCHITECTURE_TXT == "Unet":
+    ARCHITECTURE = sm.Unet
 
 preprocess_input = sm.get_preprocessing(BACKBONE)
 
@@ -231,13 +239,12 @@ wandb.config.update({"epochs": EPOCHS, "lr": LR, "backbone": BACKBONE,
 n_classes = len(CLASSES) + 1
 activation = 'softmax'
 
-with tf.distribute.MirroredStrategy(['/GPU:0']).scope():
-    # create model
-    model = ARCHITECTURE(BACKBONE, classes=n_classes, activation=activation)
+# create model
+model = ARCHITECTURE(BACKBONE, classes=n_classes, activation=activation)
 
 
-    # define optomizer
-    optim = keras.optimizers.Adam(LR)
+# define optomizer
+optim = keras.optimizers.Adam(LR)
 
 # Segmentation models losses can be combined together by '+' and scaled by integer or float factor
 # set class weights for dice_loss (car: 1.; pedestrian: 2.; background: 0.5;)
@@ -318,7 +325,8 @@ train_dataloader = Dataloder(
 valid_dataloader = Dataloder(valid_dataset, batch_size=1, shuffle=False)
 
 # define callbacks for learning rate scheduling and best checkpoints saving
-checkpoint_path = './keras_checkpoints/best_model_{epoch:02d}'
+checkpoint_path = './keras_checkpoints/best_model_{epoch:02d}' + \
+    f'_{wandb.run.name}'
 checkpoint_dir = os.path.dirname(checkpoint_path)
 callbacks = [
     keras.callbacks.ModelCheckpoint(
@@ -338,13 +346,6 @@ history = model.fit(
     validation_data=valid_dataloader,
     validation_steps=len(valid_dataloader),
 )
-
-
-# test_dataset = Dataset(
-#     DATA_DIR,
-#     MASK_DIR,
-#     classes=CLASSES,
-# )
 
 test_dataloader = Dataloder(test_dataset, batch_size=1, shuffle=False)
 # load best weights

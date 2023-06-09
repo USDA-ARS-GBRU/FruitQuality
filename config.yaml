@@ -1,0 +1,16 @@
+program: train.py
+project: fruit-quality
+method: grid
+metric:
+  name: loss
+  goal: minimize
+parameters:
+  batch_size:
+    values: [1, 2, 4]
+  backbone:
+    values: ['efficientnetb0', 'efficientnetb1', 'efficientnetb2', 'efficientnetb3', 'efficientnetb4', 'efficientnetb5', 'efficientnetb6', 'efficientnetb7']
+  epochs:
+    value: 200
+  architecture:
+    values: ['Unet', 'Linknet']
+  
