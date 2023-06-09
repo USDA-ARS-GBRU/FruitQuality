@@ -152,10 +152,11 @@ class Dataloder(keras.utils.Sequence):
 
 
 api = wandb.Api()
-artifact = api.artifact('mresham/my-awesome-project/clean-cosmos-7_model:v0')
+artifact_path = 'mresham/my-awesome-project/driven-sweep-2_model:v0'
+artifact = api.artifact(artifact_path)
 artifact.download()
-path = "artifacts/clean-cosmos-7_model-v0"
-model = tf.keras.models.load_model(path, compile=False)
+path = "artifacts/" + artifact_path.split("/")[-1]
+model = tf.keras.saving.load_model(path, compile=False)
 
 DATA_DIR = './Images/'
 MASK_DIR = './Masks/'
