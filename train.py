@@ -1,4 +1,5 @@
 # autopep8: off
+import shutil
 import os
 os.environ['SM_FRAMEWORK'] = 'tf.keras'
 # autopep8: on
@@ -263,6 +264,8 @@ class PlotSampleImages(keras.callbacks.Callback):
         super(PlotSampleImages, self).__init__()
 
     def on_epoch_end(self, epoch, logs=None):
+        if epoch % 20 != 0:
+            return
         train_pred = self.model.predict(np.expand_dims(dataset_image, axis=0))
 
         image = wandb.Image(dataset_image,
@@ -325,9 +328,11 @@ train_dataloader = Dataloder(
 valid_dataloader = Dataloder(valid_dataset, batch_size=1, shuffle=False)
 
 # define callbacks for learning rate scheduling and best checkpoints saving
-checkpoint_path = './keras_checkpoints/best_model_{epoch:02d}' + \
-    f'_{wandb.run.name}'
-checkpoint_dir = os.path.dirname(checkpoint_path)
+run_name = wandb.run.name
+checkpoint_dir = f'./keras_checkpoints/{wandb.run.name}'
+if not os.path.exists(checkpoint_dir):
+    os.makedirs(checkpoint_dir)
+checkpoint_path = os.path.join(checkpoint_dir, "best_model_{epoch:02d}")
 callbacks = [
     keras.callbacks.ModelCheckpoint(
         checkpoint_path, save_weights_only=True, save_best_only=True),
@@ -375,3 +380,8 @@ artifact.add_dir(model_dir)
 wandb.run.log_artifact(artifact)
 
 wandb.finish()
+
+# Cleanup checkpoints and models
+for subpath in ["", "_model"]:
+    path = "keras_checkpoints/" + run_name + subpath
+    shutil.rmtree(path)
