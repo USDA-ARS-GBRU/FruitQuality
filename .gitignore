@@ -9,3 +9,4 @@ Masks/
 wandb/
 best_model*
 artifacts/
+tmp/
