@@ -1,0 +1,1 @@
+set fflag_feat_front_dev_4081_magic_wand_tool=1 && label-studio
