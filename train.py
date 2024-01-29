@@ -22,8 +22,8 @@ run = wandb.init(config=config)
 
 
 
-DATA_DIR = './Images/'
-MASK_DIR = './Masks/'
+DATA_DIR = 'label exports/Images/'
+MASK_DIR = 'label exports/Masks/'
 
 
 def visualize(rows=1, **images):
@@ -49,31 +49,32 @@ def denormalize(x):
 
 
 def image_to_same_shape(image, height, width):
-    if len(image.shape) == 2:
-        old_image_height, old_image_width = image.shape
-    else:
-        old_image_height, old_image_width, channels = image.shape
+    # if len(image.shape) == 2:
+    #     old_image_height, old_image_width = image.shape
+    # else:
+    #     old_image_height, old_image_width, channels = image.shape
 
-    # create new image of desired size and color (blue) for padding
-    new_image_width = width
-    new_image_height = height
-    color = (0)
-    if len(image.shape) == 2:
-        result = np.full((new_image_height, new_image_width),
-                         color, dtype=np.uint8)
-    else:
-        result = np.full((new_image_height, new_image_width,
-                         channels), color, dtype=np.uint8)
+    # # create new image of desired size and color (blue) for padding
+    # new_image_width = width
+    # new_image_height = height
+    # color = (0)
+    # if len(image.shape) == 2:
+    #     result = np.full((new_image_height, new_image_width),
+    #                      color, dtype=np.uint8)
+    # else:
+    #     result = np.full((new_image_height, new_image_width,
+    #                      channels), color, dtype=np.uint8)
 
-    # compute center offset
-    x_center = (new_image_width - old_image_width) // 2
-    y_center = (new_image_height - old_image_height) // 2
+    # # compute center offset
+    # x_center = (new_image_width - old_image_width) // 2
+    # y_center = (new_image_height - old_image_height) // 2
 
-    # copy img image into center of result image
-    result[y_center:y_center+old_image_height,
-           x_center:x_center+old_image_width] = image
+    # # copy img image into center of result image
+    # result[y_center:y_center+old_image_height,
+    #        x_center:x_center+old_image_width] = image
 
-    return result
+    # return result
+    return tf.image.resize_with_crop_or_pad(image, height, width)
 
 
 class Dataset:
@@ -106,7 +107,7 @@ class Dataset:
         self.images_fps = [os.path.join(images_dir, image_id)
                            for image_id in self.ids]
         self.masks_fps = [os.path.join(
-            masks_dir, image_id)+'.png' for image_id in self.ids]
+            masks_dir, image_id) for image_id in self.ids]
 
         # convert str names to class values on masks
         self.class_values = [self.CLASSES.index(
@@ -123,10 +124,10 @@ class Dataset:
         mask = cv2.imread(self.masks_fps[i], 0)
 
         image = image_to_same_shape(image, 1024, 1024)
-        mask = image_to_same_shape(mask, 1024, 1024)
+        mask = image_to_same_shape(mask[..., tf.newaxis], 1024, 1024)[:,:,0]
 
         # extract certain classes from mask (e.g. cars)
-        masks = [(mask == v*(255//4)) for v in self.class_values]
+        masks = [(mask == v*(255//5)) for v in self.class_values]
         mask = np.stack(masks, axis=-1).astype('float')
 
         # add background if mask is not binary
@@ -277,7 +278,8 @@ class PlotSampleImages(keras.callbacks.Callback):
 
 
 # We list the ids from the mask_dir to make sure that we have data in dataset that have been labelled
-data_ids = [image_id.replace(".png", "") for image_id in os.listdir(MASK_DIR)]
+# data_ids = [image_id.replace(".png", "") for image_id in os.listdir(MASK_DIR)]
+data_ids = os.listdir(MASK_DIR)
 SIZE = len(data_ids)
 TRAIN_SIZE = int(0.6 * SIZE)
 VAL_SIZE = int(0.2 * SIZE)

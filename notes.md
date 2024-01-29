@@ -1,6 +1,9 @@
 ## Naive Bayes Pipeline
 - create_mask
   - Takes the label studio output file and segments flavedo, albedo and pulp into their separate images
+- create_mask_brush_labels
+  - Takes the label studio output file and brush label segments flavedo, albedo and pulp into their separate images
+  - It also extracts the number of seeds
 - test_UP_run_script
   - This is the baseline Naive bayes model that runs on one image
   - Uses `pulp_naive_bayes_pdfs.txt` as the parameters for inference | It was generated uses `pcv-train.py` from `pcv` module previously, not present here
