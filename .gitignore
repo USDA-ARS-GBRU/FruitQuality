@@ -10,3 +10,4 @@ wandb/
 best_model*
 artifacts/
 tmp/
+*__pycache__*
