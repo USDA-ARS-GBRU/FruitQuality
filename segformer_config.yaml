@@ -1,0 +1,13 @@
+program: Segformer copy sweep.py
+project: Delete_Later
+method: grid
+name: sweep_demo
+metric:
+  name: loss
+  goal: minimize
+parameters:
+  epochs:
+    value: 2
+  backbone:
+    values: ["nvidia/segformer-b0-finetuned-ade-512-512", "nvidia/segformer-b1-finetuned-ade-512-512", "nvidia/segformer-b2-finetuned-ade-512-512", "nvidia/segformer-b3-finetuned-ade-512-512", "nvidia/segformer-b4-finetuned-ade-512-512"]
+  

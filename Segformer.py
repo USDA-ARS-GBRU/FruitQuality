@@ -10,17 +10,20 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 import os
+import json
 from PIL import Image
 import numpy as np
 import wandb
+import sys
 
-DATA_DIR = 'C:\\Users\\shaki\\OneDrive\\Documents\\GitHub\\FruitQuality\\FruitQuality\\label exports\\Images'
-MASK_DIR = 'C:\\Users\\shaki\\OneDrive\\Documents\\GitHub\\FruitQuality\\FruitQuality\\label exports\\Masks'
-wandb_logger = WandbLogger(log_model=True, project="Feb-2024-test")
-
-
+DATA_DIR = '/home/mresham/fruitQuality/Images'
+MASK_DIR = '/home/mresham/fruitQuality/Masks'
+SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
+#wandb_logger = WandbLogger(log_model=True)
+MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
 EPOCHS = 2
-data_ids = os.listdir(MASK_DIR)
+
+data_ids = [mask_id.split(".png")[0] for mask_id in os.listdir(SEED_DATA + "Masks")]
 SIZE = len(data_ids)
 TRAIN_SIZE = int(0.6 * SIZE)
 VAL_SIZE = int(0.2 * SIZE)  # Also Test size
@@ -41,11 +44,14 @@ class SemanticSegmentationDataset(Dataset):
             preprocessing=None,
     ):
         self.ids = ids
-        self.images_fps = [os.path.join(images_dir, image_id)
-                           for image_id in self.ids]
-        self.masks_fps = [os.path.join(
-            masks_dir, image_id) for image_id in self.ids]
-
+        # self.images_fps = [os.path.join(images_dir, image_id.replace(".png", ""))
+#                           for image_id in self.ids]
+        self.images_fps = [os.path.join(SEED_DATA, "Images", f"{id_}.png") for id_ in ids]
+        #self.masks_fps = [os.path.join(
+        #    masks_dir, image_id) for image_id in self.ids]
+        self.masks_fps = [os.path.join(SEED_DATA, "Masks", f"{id_}.png") for id_ in ids]
+        self.meta_fps = [os.path.join(SEED_DATA, "Images", f"{id_}_meta.json") for id_ in ids]
+        
         # convert str names to class values on masks
         self.class_values = [self.CLASSES.index(
             cls.lower()) for cls in classes]
@@ -61,12 +67,15 @@ class SemanticSegmentationDataset(Dataset):
     def __getitem__(self, i):
         image = Image.open(self.images_fps[i])
         segmentation_map = Image.open(self.masks_fps[i])
+        with open(self.meta_fps[i]) as f:
+            meta_data = json.load(f)
 
         # randomly crop + pad both image and segmentation map to same size
         encoded_inputs = self.feature_extractor(
             image, segmentation_map, return_tensors="pt")
         encoded_inputs['labels'] //= 51
         encoded_inputs['labels'] -= 1
+        encoded_inputs['seeds'] = torch.tensor([meta_data['seedCount']])
 
         for k, v in encoded_inputs.items():
             encoded_inputs[k].squeeze_()  # remove batch dimension
@@ -82,6 +91,145 @@ class SemanticSegmentationDataset(Dataset):
     def get_mask(self, i):
         return Image.open(self.masks_fps[i])
 
+    def get_nseeds(self, i):
+        with open(self.meta_fps[i]) as f:
+            meta_data = json.load(f)
+        return meta_data['seedCount']
+
+
+class SegformerForSemanticSegmentationAndImageClassification(SegformerPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.segformer = SegformerModel(config)
+       
+        self.decode_head = SegformerDecodeHead(config)
+
+
+        self.num_labels = config.num_labels
+        # Classifier head
+        self.classifier = nn.Linear(config.hidden_sizes[-1], config.num_labels)
+
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        labels: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, SemanticSegmenterOutput, SegFormerImageClassifierOutput]:
+       
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+
+
+        outputs = self.segformer(
+            pixel_values,
+            output_attentions=output_attentions,
+            output_hidden_states=True,  # we need the intermediate hidden states
+            return_dict=return_dict,
+        )
+
+
+        encoder_hidden_states = outputs.hidden_states if return_dict else outputs[1]
+
+
+        logits = self.decode_head(encoder_hidden_states)
+
+
+        # Image classification stuff
+        sequence_output = outputs[0]
+        # convert last hidden states to (batch_size, height*width, hidden_size)
+        batch_size = sequence_output.shape[0]
+
+
+        if self.config.reshape_last_stage:
+            # (batch_size, num_channels, height, width) -> (batch_size, height, width, num_channels)
+            sequence_output = sequence_output.permute(0, 2, 3, 1)
+        sequence_output = sequence_output.reshape(batch_size, -1, self.config.hidden_sizes[-1])
+         # global average pooling
+        sequence_output = sequence_output.mean(dim=1)
+        cl_logits = self.classifier(sequence_output)
+        cl_loss = None
+        # Image classification stuff end
+
+
+        loss = None
+        if labels is not None:
+            # upsample logits to the images' original size
+            upsampled_logits = nn.functional.interpolate(
+                logits, size=labels.shape[-2:], mode="bilinear", align_corners=False
+            )
+            if self.config.num_labels > 1:
+                loss_fct = CrossEntropyLoss(ignore_index=self.config.semantic_loss_ignore_index)
+                loss = loss_fct(upsampled_logits, labels)
+            elif self.config.num_labels == 1:
+                valid_mask = ((labels >= 0) & (labels != self.config.semantic_loss_ignore_index)).float()
+                loss_fct = BCEWithLogitsLoss(reduction="none")
+                loss = loss_fct(upsampled_logits.squeeze(1), labels.float())
+                loss = (loss * valid_mask).mean()
+            else:
+                raise ValueError(f"Number of labels should be >=0: {self.config.num_labels}")
+
+
+            # Classification stuff
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+
+
+        if not return_dict:
+            if output_hidden_states:
+                output = (logits,) + outputs[1:]
+            else:
+                output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+
+        # Classification Stuff
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+
+        return SemanticSegmenterOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states if output_hidden_states else None,
+            attentions=outputs.attentions,
+        )
+        return SegFormerImageClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+ 
 
 class SegformerFinetuner(pl.LightningModule):
 
@@ -100,7 +248,7 @@ class SegformerFinetuner(pl.LightningModule):
         self.label2id = {v: k for k, v in self.id2label.items()}
 
         self.model = SegformerForSemanticSegmentation.from_pretrained(
-            "nvidia/segformer-b0-finetuned-ade-512-512",
+            MODEL_BASE,
             return_dict=False,
             num_labels=self.num_classes,
             id2label=self.id2label,
@@ -267,7 +415,7 @@ class SegformerFinetuner(pl.LightningModule):
 
 
 feature_extractor = SegformerFeatureExtractor.from_pretrained(
-    "nvidia/segformer-b0-finetuned-ade-512-512")
+    MODEL_BASE)
 feature_extractor.reduce_labels = False
 feature_extractor.size = 128
 
@@ -293,6 +441,9 @@ test_dataset = SemanticSegmentationDataset(
     classes=CLASSES,
     feature_extractor=feature_extractor,
 )
+
+print(train_dataset[0])
+sys.exit(1)
 
 batch_size = 8
 num_workers = 0
@@ -326,10 +477,13 @@ trainer = pl.Trainer(
     # devices=0,
     accelerator='gpu',
     callbacks=[early_stop_callback, checkpoint_callback],
-    max_epochs=EPOCHS,
-    val_check_interval=len(train_dataloader),
+    max_epochs=500,
+    # val_check_interval=len(train_dataloader),
+    check_val_every_n_epoch=None,
     logger=wandb_logger
 )
+wandb_logger.experiment.config.update({"model": MODEL_BASE})
+
 trainer.fit(segformer_finetuner)
 
 
@@ -356,18 +510,17 @@ seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
 wandb_logger.log_image(
     "example_image", [dataset_image], caption=["Input image"])
 
-class_labels = {0: "Background",
-                1: "Flavedo",
-                2: "Pulp",
-                3: "Albedo",
-                4: "Seed"
-                }
 
 wandb_logger.log_image("example_image", [dataset_image], caption=["True Masks"],
                        masks=[{
                            "ground_truth": {
                                "mask_data": (np.array(test_dataset.get_mask(0)) // 51).squeeze(),
-                               "class_labels": class_labels
+                               "class_labels": {0: "Background",
+                                                1: "Seed",
+                                                2: "Pulp",
+                                                3: "Albedo",
+                                                4: "Flavedo"
+                                                }
                            }}
 ])
 
@@ -375,7 +528,13 @@ wandb_logger.log_image("example_image", [dataset_image], caption=["Predicted Mas
                        masks=[{
                            "predicted_mask": {
                                "mask_data": seg.squeeze(),
-                               "class_labels": class_labels
+                               "class_labels": {
+                                   0: "Seed",
+                                   1: "Pulp",
+                                   2: "Albedo",
+                                   3: "Flavedo", 
+                                   4: "Background",
+                               }
                            }}
 ])
 
@@ -396,26 +555,26 @@ def prediction_to_vis(prediction):
     return Image.fromarray(vis.astype(np.uint8))
 
 
-for batch in test_dataloader:
-    images, masks = batch['pixel_values'], batch['labels']
-    outputs = segformer_finetuner.model(images, masks)
+# for batch in test_dataloader:
+#     images, masks = batch['pixel_values'], batch['labels']
+#     outputs = segformer_finetuner.model(images, masks)
 
-    loss, logits = outputs[0], outputs[1]
+#     loss, logits = outputs[0], outputs[1]
 
-    upsampled_logits = nn.functional.interpolate(
-        logits,
-        size=masks.shape[-2:],
-        mode="bilinear",
-        align_corners=False
-    )
-    predicted_mask = upsampled_logits.argmax(dim=1).cpu().numpy()
-    masks = masks.cpu().numpy()
+#     upsampled_logits = nn.functional.interpolate(
+#         logits,
+#         size=masks.shape[-2:],
+#         mode="bilinear",
+#         align_corners=False
+#     )
+#     predicted_mask = upsampled_logits.argmax(dim=1).cpu().numpy()
+#     masks = masks.cpu().numpy()
 
 
-n_plots = 4
-f, axarr = plt.subplots(n_plots, 2)
-f.set_figheight(15)
-f.set_figwidth(15)
-for i in range(n_plots):
-    axarr[i, 0].imshow(prediction_to_vis(predicted_mask[i, :, :]))
-    axarr[i, 1].imshow(prediction_to_vis(masks[i, :, :]))
+# n_plots = 4
+# f, axarr = plt.subplots(n_plots, 2)
+# f.set_figheight(15)
+# f.set_figwidth(15)
+# for i in range(n_plots):
+#     axarr[i, 0].imshow(prediction_to_vis(predicted_mask[i, :, :]))
+#     axarr[i, 1].imshow(prediction_to_vis(masks[i, :, :]))

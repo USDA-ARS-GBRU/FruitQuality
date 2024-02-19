@@ -11,7 +11,7 @@
   - This file is a copy of `test_UP_run_script`. The modification is that it takes an image as an input and outputs the masked photos with the 20 pixel border removed
 - naive_bayes_evaluate
   - This is the naive bayes pipeline that uses the scoring functions from `evaluate.py` to calculate metrics and then stores it in `naive_bayes_baseline.csv`
-- evaluate
+- evaluate_
   - Calculates dice, iou and f score for 2 images
 
 ## Neural Network models

@@ -1,4 +1,5 @@
 venv/
+venvTorch/
 
 .ipynb_checkpoints/
 Images/
@@ -6,8 +7,11 @@ Images_Processed/
 keras_checkpoints/
 label exports/
 Masks/
+exports_seeds/
 wandb/
+lightning_logs/
 best_model*
 artifacts/
 tmp/
 *__pycache__*
+Delete_Later/

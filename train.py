@@ -1,18 +1,16 @@
 # autopep8: off
-import shutil
-import os
-os.environ['SM_FRAMEWORK'] = 'tf.keras'
-# autopep8: on
-
-import yaml
-import cv2
-import keras
-import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-import albumentations as A
-import segmentation_models as sm
+import shutil # nopep8
+import os # nopep8
+os.environ['SM_FRAMEWORK'] = 'tf.keras' # nopep8
 import wandb
+import segmentation_models as sm
+import albumentations as A
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import numpy as np
+import keras
+import cv2
+import yaml
 
 
 with open('./config.yaml') as file:
@@ -98,7 +96,7 @@ class Dataset:
             ids,
             images_dir,
             masks_dir,
-            classes=None,
+            classes=None, # ['seed', 'pulp', 'albedo', 'flavedo']
             augmentation=None,
             preprocessing=None,
     ):
@@ -220,6 +218,7 @@ def get_preprocessing(preprocessing_fn):
 BACKBONE = wandb.config.backbone
 BATCH_SIZE = wandb.config.batch_size
 CLASSES = ['seed', 'pulp', 'albedo', 'flavedo']
+CLASSES = list(reversed(CLASSES))
 LR = 0.0001
 EPOCHS = wandb.config.epochs
 ARCHITECTURE_TXT = wandb.config.architecture
@@ -233,8 +232,8 @@ preprocess_input = sm.get_preprocessing(BACKBONE)
 
 
 wandb.config.update({"epochs": EPOCHS, "lr": LR, "backbone": BACKBONE,
-                    "architecture": ARCHITECTURE_TXT, "activation": "softmax", 
-                    "batch_size": BATCH_SIZE})
+                    "architecture": ARCHITECTURE_TXT, "activation": "softmax",
+                     "batch_size": BATCH_SIZE})
 
 
 # define network parameters
