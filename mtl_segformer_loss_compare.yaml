@@ -1,7 +1,7 @@
-program: Segformer Diceloss.py
+program: MTL Segformer Diceloss.py
 project: Delete_Later
 method: grid
-name: Segformer_DiceLoss
+name: MultiTaskSegformer Loss camparison in Focal, Dice, Focal+Dice
 metric:
   name: test_mean_iou
   goal: maximize
@@ -12,4 +12,6 @@ parameters:
     values: ["nvidia/segformer-b0-finetuned-ade-512-512", "nvidia/segformer-b1-finetuned-ade-512-512", "nvidia/segformer-b2-finetuned-ade-512-512", "nvidia/segformer-b3-finetuned-ade-512-512", "nvidia/segformer-b4-finetuned-ade-512-512"]
   weights:
     value: None
+  loss_fct:
+    values: ["multi", "focal", "dice"]
   

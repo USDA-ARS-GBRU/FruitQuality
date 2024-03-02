@@ -1,7 +1,7 @@
 program: Segformer Diceloss.py
 project: Delete_Later
 method: grid
-name: Segformer_DiceLoss
+name: Segformer_Weighted_DiceLoss
 metric:
   name: test_mean_iou
   goal: maximize
@@ -11,5 +11,4 @@ parameters:
   backbone:
     values: ["nvidia/segformer-b0-finetuned-ade-512-512", "nvidia/segformer-b1-finetuned-ade-512-512", "nvidia/segformer-b2-finetuned-ade-512-512", "nvidia/segformer-b3-finetuned-ade-512-512", "nvidia/segformer-b4-finetuned-ade-512-512"]
   weights:
-    value: None
-  
+    values: [[1,1,1,1,1], [1,10,1,1,1], [1,1,10,1,1], [1,1,1,10,1], [1,1,1,1,10]]

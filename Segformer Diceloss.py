@@ -20,6 +20,7 @@ import wandb
 import sys
 import random
 import yaml
+from torchmetrics.functional.classification import dice
 
 from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, CrossEntropyLoss, SegformerDecodeHead, SegformerModel, SegformerPreTrainedModel, SemanticSegmenterOutput, SegFormerImageClassifierOutput, MSELoss
 from typing import Optional, Tuple, Union
@@ -36,6 +37,9 @@ SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
 wandb_logger = WandbLogger(log_model=True, experiment=run)
 MODEL_BASE = wandb.config.backbone 
 EPOCHS = wandb.config.epochs
+WEIGHTS = wandb.config.weights
+WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(device="cuda") if WEIGHTS != "None" else None
+LOSS = wandb.config.loss_fct
 
 data_ids = [mask_id.split(".png")[0]
             for mask_id in os.listdir(SEED_DATA + "Masks")]
@@ -129,7 +133,7 @@ class FocalLoss_MulticlassDiceLoss(nn.Module):
             and does not contribute to the input gradient.
     """
 
-    def __init__(self, num_classes, softmax_dim=None, gamma=2, weight=None, ignore_index=-100):
+    def __init__(self, num_classes, softmax_dim=None, gamma=2, weight=None, ignore_index=-100, loss="multi"):
         super().__init__()
         self.gamma = gamma
         self.weight = weight
@@ -137,36 +141,37 @@ class FocalLoss_MulticlassDiceLoss(nn.Module):
 
         self.num_classes = num_classes
         self.softmax_dim = softmax_dim
+        self.loss_fct = loss
 
     def forward(self, input, target, reduction='mean', smooth=1e-6):
-        # Focal Loss
-        logit = F.log_softmax(input, dim=1)
-        pt = torch.exp(logit)
-        logit = (1 - pt)**self.gamma * logit
-        focal_loss = F.nll_loss(
-            logit, target, self.weight, ignore_index=self.ignore_index)
+        if self.loss_fct == "multi" or self.loss_fct == "focal":
+            # Focal Loss
+            logit = F.log_softmax(input, dim=1)
+            pt = torch.exp(logit)
+            logit = (1 - pt)**self.gamma * logit
+            focal_loss = F.nll_loss(
+                logit, target, self.weight, ignore_index=self.ignore_index)
 
-        # Dice Loss
-        probabilities = input
-        if self.softmax_dim is not None:
-            probabilities = nn.Softmax(dim=self.softmax_dim)(input)
-        # end if
-        targets_one_hot = F.one_hot(target, num_classes=self.num_classes)
-        # print(targets_one_hot.shape)
-        # Convert from NHWC to NCHW
-        targets_one_hot = targets_one_hot.permute(0, 3, 1, 2)
+        if self.loss_fct == "multi" or self.loss_fct == "dice":
+            targets_one_hot = F.one_hot(
+                target, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+            true_1_hot = targets_one_hot
+            probas = F.softmax(input, dim=1)
+            true_1_hot = true_1_hot.type(input.type())
+            dims = (0,) + tuple(range(2, target.ndimension()))
+            intersection = torch.sum(probas * true_1_hot, dims)
+            cardinality = torch.sum(probas + true_1_hot, dims)
+            dice_coefficient = (2. * intersection / (cardinality + smooth)).mean()
+            dice_loss = -dice_coefficient.log()
 
-        # Multiply one-hot encoded ground truth labels with the probabilities to get the
-        # prredicted probability for the actual class.
-        intersection = (targets_one_hot * probabilities).sum()
+        total_loss = 0
 
-        mod_a = intersection.sum()
-        mod_b = target.numel()
+        if self.loss_fct == "multi" or self.loss_fct == "focal":
+            total_loss = focal_loss
+        if self.loss_fct == "multi" or self.loss_fct == "dice":
+            total_loss += dice_loss
 
-        dice_coefficient = 2. * intersection / (mod_a + mod_b + smooth)
-        dice_loss = -dice_coefficient.log()
-
-        return focal_loss 
+        return total_loss
 
 
 class SegformerWithDiceLossForSemanticSegmentation(SegformerPreTrainedModel):
@@ -213,7 +218,7 @@ class SegformerWithDiceLossForSemanticSegmentation(SegformerPreTrainedModel):
             if self.config.num_labels > 1:
                 # loss_fct = CrossEntropyLoss(
                 #     ignore_index=self.config.semantic_loss_ignore_index)
-                loss_fct = FocalLoss_MulticlassDiceLoss(num_classes=5)
+                loss_fct = FocalLoss_MulticlassDiceLoss(num_classes=5, weight=WEIGHTS, loss=LOSS)
                 loss = loss_fct(upsampled_logits, labels)
             elif self.config.num_labels == 1:
                 valid_mask = ((labels >= 0) & (
@@ -504,6 +509,8 @@ res = trainer.test(ckpt_path="best")
 dataset_image = test_dataset.get_image(0)
 encoded_inputs = test_dataset[0]
 images, masks = encoded_inputs['pixel_values'], encoded_inputs['labels']
+segformer_finetuner, images, masks = segformer_finetuner.to(
+    device="cuda"), images.to(device="cuda"), masks.to(device="cuda")
 outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
 
 loss, logits = outputs[0], outputs[1]
@@ -562,44 +569,3 @@ wandb_logger.log_image("example_image", [dataset_image], caption=["Predicted Mas
                                }
                            }}
 ])
-
-# color_map = {
-#     0: (0, 0, 0),
-#     1: (255, 0, 0),
-#     2: (0, 255, 0),
-#     3: (0, 0, 255),
-#     4: (120, 120, 0),
-# }
-
-
-# def prediction_to_vis(prediction):
-#     vis_shape = prediction.shape + (3,)
-#     vis = np.zeros(vis_shape)
-#     for i, c in color_map.items():
-#         vis[prediction == i] = color_map[i]
-#     return Image.fromarray(vis.astype(np.uint8))
-
-
-# for batch in test_dataloader:
-#     images, masks = batch['pixel_values'], batch['labels']
-#     outputs = segformer_finetuner.model(images, masks)
-
-#     loss, logits = outputs[0], outputs[1]
-
-#     upsampled_logits = nn.functional.interpolate(
-#         logits,
-#         size=masks.shape[-2:],
-#         mode="bilinear",
-#         align_corners=False
-#     )
-#     predicted_mask = upsampled_logits.argmax(dim=1).cpu().numpy()
-#     masks = masks.cpu().numpy()
-
-
-# n_plots = 4
-# f, axarr = plt.subplots(n_plots, 2)
-# f.set_figheight(15)
-# f.set_figwidth(15)
-# for i in range(n_plots):
-#     axarr[i, 0].imshow(prediction_to_vis(predicted_mask[i, :, :]))
-#     axarr[i, 1].imshow(prediction_to_vis(masks[i, :, :]))

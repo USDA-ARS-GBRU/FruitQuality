@@ -10,4 +10,5 @@ parameters:
     value: 200
   backbone:
     values: ["nvidia/segformer-b0-finetuned-ade-512-512", "nvidia/segformer-b1-finetuned-ade-512-512", "nvidia/segformer-b2-finetuned-ade-512-512", "nvidia/segformer-b3-finetuned-ade-512-512", "nvidia/segformer-b4-finetuned-ade-512-512"]
-  
+  weights:
+    value: None

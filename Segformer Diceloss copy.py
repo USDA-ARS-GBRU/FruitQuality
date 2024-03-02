@@ -20,30 +20,28 @@ import wandb
 import sys
 import random
 import yaml
+from torchmetrics.functional.classification import dice
 
 from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, CrossEntropyLoss, SegformerDecodeHead, SegformerModel, SegformerPreTrainedModel, SemanticSegmenterOutput, SegFormerImageClassifierOutput, MSELoss
 from typing import Optional, Tuple, Union
-from evaluate import load
 
-with open('./mtl_segformer_diceloss_config.yaml') as file:
-    config = yaml.load(file, Loader=yaml.FullLoader)
+# with open('./segformer_diceloss_config.yaml') as file:
+#     config = yaml.load(file, Loader=yaml.FullLoader)
 
-run = wandb.init(config=config)
+# run = wandb.init(config=config)
 
 
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
-wandb_logger = WandbLogger(log_model=True, experiment=run)
-# wandb_logger = WandbLogger(project="Delete_Later", offline=False)
-# MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
-# EPOCHS = 1
-MODEL_BASE = wandb.config.backbone 
-EPOCHS = wandb.config.epochs
-WEIGHTS = wandb.config.weights
-WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
-    device="cuda") if WEIGHTS != "None" else None
-LOSS = wandb.config.loss_fct
+# wandb_logger = WandbLogger(log_model=True, experiment=run)
+wandb_logger = WandbLogger(offline=True)
+# MODEL_BASE = wandb.config.backbone
+# EPOCHS = wandb.config.epochs
+# WEIGHTS = wandb.config.weights
+MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
+EPOCHS = 1
+WEIGHTS = None
 
 data_ids = [mask_id.split(".png")[0]
             for mask_id in os.listdir(SEED_DATA + "Masks")]
@@ -96,19 +94,18 @@ class SemanticSegmentationDataset(Dataset):
     def __getitem__(self, i):
         image = Image.open(self.images_fps[i])
         segmentation_map = Image.open(self.masks_fps[i])
-        with open(self.meta_fps[i]) as f:
-            meta_data = json.load(f)
+        # with open(self.meta_fps[i]) as f:
+        #     meta_data = json.load(f)
 
         # randomly crop + pad both image and segmentation map to same size
         encoded_inputs = self.feature_extractor(
             image, segmentation_map, return_tensors="pt")
         encoded_inputs['labels'] //= 51
         encoded_inputs['labels'] -= 1
+        # encoded_inputs['seeds'] = torch.tensor([meta_data['seedCount']])
 
         for k, v in encoded_inputs.items():
             encoded_inputs[k].squeeze_()  # remove batch dimension
-
-        encoded_inputs['seedCount'] = torch.tensor([meta_data['seedCount']])
 
         return encoded_inputs
 
@@ -121,10 +118,10 @@ class SemanticSegmentationDataset(Dataset):
     def get_mask(self, i):
         return Image.open(self.masks_fps[i])
 
-    def get_nseeds(self, i):
-        with open(self.meta_fps[i]) as f:
-            meta_data = json.load(f)
-        return meta_data['seedCount']
+    # def get_nseeds(self, i):
+    #     with open(self.meta_fps[i]) as f:
+    #         meta_data = json.load(f)
+    #     return meta_data['seedCount']
 
 
 class FocalLoss_MulticlassDiceLoss(nn.Module):
@@ -138,7 +135,7 @@ class FocalLoss_MulticlassDiceLoss(nn.Module):
             and does not contribute to the input gradient.
     """
 
-    def __init__(self, num_classes, softmax_dim=None, gamma=2, weight=None, ignore_index=-100, loss="multi"):
+    def __init__(self, num_classes, softmax_dim=None, gamma=2, weight=None, ignore_index=-100):
         super().__init__()
         self.gamma = gamma
         self.weight = weight
@@ -146,41 +143,90 @@ class FocalLoss_MulticlassDiceLoss(nn.Module):
 
         self.num_classes = num_classes
         self.softmax_dim = softmax_dim
-        self.loss_fct = loss
 
     def forward(self, input, target, reduction='mean', smooth=1e-6):
-        if self.loss_fct == "multi" or self.loss_fct == "focal":
-            # Focal Loss
-            logit = F.log_softmax(input, dim=1)
-            pt = torch.exp(logit)
-            logit = (1 - pt)**self.gamma * logit
-            focal_loss = F.nll_loss(
-                logit, target, self.weight, ignore_index=self.ignore_index)
+        # Focal Loss
+        logit = F.log_softmax(input, dim=1)
+        pt = torch.exp(logit)
+        logit = (1 - pt)**self.gamma * logit
+        focal_loss = F.nll_loss(
+            logit, target, self.weight, ignore_index=self.ignore_index)
 
-        if self.loss_fct == "multi" or self.loss_fct == "dice":
-            targets_one_hot = F.one_hot(
-                target, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-            true_1_hot = targets_one_hot
-            probas = F.softmax(input, dim=1)
-            true_1_hot = true_1_hot.type(input.type())
-            dims = (0,) + tuple(range(2, target.ndimension()))
-            intersection = torch.sum(probas * true_1_hot, dims)
-            cardinality = torch.sum(probas + true_1_hot, dims)
-            dice_coefficient = (2. * intersection /
-                                (cardinality + smooth)).mean()
-            dice_loss = -dice_coefficient.log()
+        # Dice Loss
+        # probabilities = input
+        # if self.softmax_dim is not None:
+        #     probabilities = nn.Softmax(dim=self.softmax_dim)(input)
+        # # end if
+        # targets_one_hot = F.one_hot(target, num_classes=self.num_classes)
+        # # print(targets_one_hot.shape)
+        # # Convert from NHWC to NCHW
+        # targets_one_hot = targets_one_hot.permute(0, 3, 1, 2)
 
-        total_loss = 0
+        # # Multiply one-hot encoded ground truth labels with the probabilities to get the
+        # # prredicted probability for the actual class.
+        # intersection = (targets_one_hot * probabilities).sum()
 
-        if self.loss_fct == "multi" or self.loss_fct == "focal":
-            total_loss = focal_loss
-        if self.loss_fct == "multi" or self.loss_fct == "dice":
-            total_loss += dice_loss
+        # mod_a = intersection.sum()
+        # mod_b = target.numel()
 
-        return total_loss
+        # dice_coefficient = 2. * intersection / (mod_a + mod_b + smooth)
+        # dice_loss = -dice_coefficient.log()
+
+        # flattened_array = target.view(batch_size, -1).cuda()
+        # pred_1_hot = torch.eye(self.num_classes).cuda()[flattened_array].cuda()
+        # pred_1_hot = pred_1_hot.view(batch_size, target.shape[-1], target.shape[-1], self.num_classes).cuda()
 
 
-class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(SegformerPreTrainedModel):
+
+        # for i in range(self.num_classes):
+        #     print(i)
+        #     true = input[:, i, :, :]
+        #     # print(pred_1_hot)
+        #     print(input.shape)
+        #     print(pred_1_hot.shape)
+        #     print(true.shape)
+        #     pred = pred_1_hot[:, :, :, i]
+        #     print(pred.shape)
+            
+        #     # true_1_hot = torch.eye(2).cuda()[true]
+        #     # true_1_hot = true_1_hot.permute(0, 3, 1, 2).float()
+        #     # true_1_hot = true.permute(0, 1, 2).float()
+        #     true_1_hot_f = true[:, 0:1, :, :]
+        #     true_1_hot_s = true_1_hot[:, 1:2, :, :]
+        #     true_1_hot = torch.cat([true_1_hot_s, true_1_hot_f], dim=1)
+        #     pos_prob = torch.sigmoid(pred)
+        #     neg_prob = 1 - pos_prob
+        #     probas = torch.cat([pos_prob, neg_prob], dim=1)
+        # true_1_hot = input
+        # true_1_hot = true_1_hot.permute(0, 3, 1, 2).float()
+        # probas = F.softmax(logits, dim=1)
+        # true_1_hot = true_1_hot.type(pred.type())
+
+        targets_one_hot = F.one_hot(
+            target, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+        num_classes = 5
+        true_1_hot = targets_one_hot
+        probas = F.softmax(input, dim=1)
+        true_1_hot = true_1_hot.type(input.type())
+        dims = (0,) + tuple(range(2, target.ndimension()))
+        intersection = torch.sum(probas * true_1_hot, dims)
+        cardinality = torch.sum(probas + true_1_hot, dims)
+        dice_coefficient = (2. * intersection / (cardinality + smooth)).mean()
+        dice_loss = -dice_coefficient.log()
+        # dice_loss = (1 - dice_coefficient)
+        # print(torch.unique(input))
+        # print(torch.unique(target))
+        # dice_loss = dice(preds=input, target=targets_one_hot.int(), average="macro", num_classes=5)
+
+
+        # print(i)
+        print("dice coefficient", dice_coefficient)
+        print("dice loss", dice_loss)
+
+        return focal_loss
+
+
+class SegformerWithDiceLossForSemanticSegmentation(SegformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.segformer = SegformerModel(config)
@@ -188,26 +234,18 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
 
         self.num_labels = config.num_labels
 
-        # Classifier head
-        self.clf_num_labels = 1
-        self.classifier = nn.Sequential(nn.Linear(config.hidden_sizes[-1], 256),
-                                        nn.ReLU(),
-                                        nn.Linear(256, 128),
-                                        nn.ReLU(),
-                                        nn.Linear(128, self.clf_num_labels))
-
         # Initialize weights and apply final processing
         self.post_init()
+        print(config)
 
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         labels: Optional[torch.LongTensor] = None,
-        seed_count=None, 
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, SemanticSegmenterOutput, SegFormerImageClassifierOutput]:
+    ) -> Union[Tuple, SemanticSegmenterOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -224,22 +262,6 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
 
         logits = self.decode_head(encoder_hidden_states)
 
-        # Image classification stuff
-        sequence_output = outputs[0]
-        # convert last hidden states to (batch_size, height*width, hidden_size)
-        batch_size = sequence_output.shape[0]
-
-        if self.config.reshape_last_stage:
-            # (batch_size, num_channels, height, width) -> (batch_size, height, width, num_channels)
-            sequence_output = sequence_output.permute(0, 2, 3, 1)
-        sequence_output = sequence_output.reshape(
-            batch_size, -1, self.config.hidden_sizes[-1])
-        # global average pooling
-        sequence_output = sequence_output.mean(dim=1)
-        cl_logits = self.classifier(sequence_output)
-        cl_loss = None
-        # Image classification stuff end
-
         loss = None
         if labels is not None:
             # upsample logits to the images' original size
@@ -249,8 +271,7 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
             if self.config.num_labels > 1:
                 # loss_fct = CrossEntropyLoss(
                 #     ignore_index=self.config.semantic_loss_ignore_index)
-                loss_fct = FocalLoss_MulticlassDiceLoss(
-                    num_classes=5, weight=WEIGHTS, loss=LOSS)
+                loss_fct = FocalLoss_MulticlassDiceLoss(num_classes=5, weight=WEIGHTS)
                 loss = loss_fct(upsampled_logits, labels)
             elif self.config.num_labels == 1:
                 valid_mask = ((labels >= 0) & (
@@ -261,63 +282,26 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
             else:
                 raise ValueError(
                     f"Number of labels should be >=0: {self.config.num_labels}")
-            
-            # Classification stuff
-            if self.config.problem_type is None:
-                if self.clf_num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.clf_num_labels > 1 and (seed_count.dtype == torch.long or seed_count.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.clf_num_labels == 1:
-                    cl_loss = loss_fct(cl_logits.squeeze(),
-                                       seed_count.squeeze().float())
-                else:
-                    cl_loss = loss_fct(cl_logits, seed_count)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                cl_loss = loss_fct(
-                    cl_logits.view(-1, self.clf_num_labels), seed_count.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                cl_loss = loss_fct(cl_logits, seed_count)
-            # Image classification stuff end
 
         if not return_dict:
             if output_hidden_states:
                 output = (logits,) + outputs[1:]
             else:
                 output = (logits,) + outputs[2:]
-            seg_return = ((loss,) + output) if loss is not None else output
+            return ((loss,) + output) if loss is not None else output
 
-            # Classification Stuff
-            cl_output = (cl_logits,) + outputs[1:]
-            cl_return = (
-                (cl_loss,) + cl_output) if loss is not None else cl_output
-
-            return (seg_return, cl_return)
-
-        return (SemanticSegmenterOutput(
+        return SemanticSegmenterOutput(
             loss=loss,
             logits=logits,
             hidden_states=outputs.hidden_states if output_hidden_states else None,
             attentions=outputs.attentions,
-        ), SegFormerImageClassifierOutput(
-            loss=cl_loss,
-            logits=cl_logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        ))
+        )
 
 
-class MTLSegformerFinetuner(pl.LightningModule):
+class SegformerFinetuner(pl.LightningModule):
 
     def __init__(self, id2label, train_dataloader=None, val_dataloader=None, test_dataloader=None, metrics_interval=100):
-        super(MTLSegformerFinetuner, self).__init__()
+        super(SegformerFinetuner, self).__init__()
         id2label[0] = 'Unlabeled'
         self.id2label = id2label
         self.metrics_interval = metrics_interval
@@ -330,7 +314,7 @@ class MTLSegformerFinetuner(pl.LightningModule):
         self.num_classes = len(id2label.keys())
         self.label2id = {v: k for k, v in self.id2label.items()}
 
-        self.model = SegformerWithDiceLossForSemanticSegmentationAndImageClassification.from_pretrained(
+        self.model = SegformerWithDiceLossForSemanticSegmentation.from_pretrained(
             MODEL_BASE,
             return_dict=False,
             num_labels=self.num_classes,
@@ -339,31 +323,24 @@ class MTLSegformerFinetuner(pl.LightningModule):
             ignore_mismatched_sizes=True,
         )
 
-        self.train_mean_iou = load("mean_iou")
-        self.val_mean_iou = load("mean_iou")
-        self.test_mean_iou = load("mean_iou")
-
-        self.train_mse = load("mse")
-        self.val_mse = load("mse")
-        self.test_mse = load("mse")
+        self.train_mean_iou = load_metric("mean_iou")
+        self.val_mean_iou = load_metric("mean_iou")
+        self.test_mean_iou = load_metric("mean_iou")
 
         self.validation_step_outputs = []
         self.test_step_outputs = []
 
-    def forward(self, images, masks, seed_count):
-        seg_outputs, clf_outputs = self.model(
-            pixel_values=images, labels=masks, seed_count=seed_count)
-        return (seg_outputs, clf_outputs)
+    def forward(self, images, masks):
+        outputs = self.model(pixel_values=images, labels=masks)
+        return (outputs)
 
     def training_step(self, batch, batch_nb):
 
-        images, masks, seed_count = batch['pixel_values'], batch['labels'], batch['seedCount']
+        images, masks = batch['pixel_values'], batch['labels']
 
-        seg_outputs, clf_outputs = self(images, masks, seed_count)      
+        outputs = self(images, masks)
 
-        loss, logits = seg_outputs[0], seg_outputs[1]
-        clf_loss, clf_logits = clf_outputs[0], clf_outputs[1]
-        total_loss = torch.add(loss, clf_loss)
+        loss, logits = outputs[0], outputs[1]
 
         upsampled_logits = nn.functional.interpolate(
             logits,
@@ -378,10 +355,6 @@ class MTLSegformerFinetuner(pl.LightningModule):
             predictions=predicted.detach().cpu().numpy(),
             references=masks.detach().cpu().numpy()
         )
-        self.train_mse.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
-        )
         if batch_nb % self.metrics_interval == 0:
 
             metrics = self.train_mean_iou.compute(
@@ -389,27 +362,24 @@ class MTLSegformerFinetuner(pl.LightningModule):
                 ignore_index=255,
                 reduce_labels=False,
             )
-            mse = self.train_mse.compute()['mse']
 
-            metrics = {'loss': total_loss,
-                       "mean_iou": metrics["mean_iou"], "mean_accuracy": metrics["mean_accuracy"], "mse": mse}
+            metrics = {
+                'loss': loss, "mean_iou": metrics["mean_iou"], "mean_accuracy": metrics["mean_accuracy"]}
 
             for k, v in metrics.items():
                 self.log(k, v, prog_bar=True)
 
             return (metrics)
         else:
-            return ({'loss': total_loss})
+            return ({'loss': loss})
 
     def validation_step(self, batch, batch_nb):
 
-        images, masks, seed_count = batch['pixel_values'], batch['labels'], batch['seedCount']
+        images, masks = batch['pixel_values'], batch['labels']
 
-        seg_outputs, clf_outputs = self(images, masks, seed_count)
+        outputs = self(images, masks)
 
-        loss, logits = seg_outputs[0], seg_outputs[1]
-        clf_loss, clf_logits = clf_outputs[0], clf_outputs[1]
-        total_loss = torch.add(loss, clf_loss)
+        loss, logits = outputs[0], outputs[1]
 
         upsampled_logits = nn.functional.interpolate(
             logits,
@@ -424,14 +394,10 @@ class MTLSegformerFinetuner(pl.LightningModule):
             predictions=predicted.detach().cpu().numpy(),
             references=masks.detach().cpu().numpy()
         )
-        self.val_mse.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
-        )
 
-        self.validation_step_outputs.append(total_loss)
+        self.validation_step_outputs.append(loss)
 
-        return ({'val_loss': total_loss})
+        return ({'val_loss': loss})
 
     def on_validation_epoch_end(self):
         outputs = self.validation_step_outputs
@@ -440,7 +406,6 @@ class MTLSegformerFinetuner(pl.LightningModule):
             ignore_index=255,
             reduce_labels=False,
         )
-        mse = self.val_mse.compute()['mse']
 
         avg_val_loss = torch.stack(outputs).mean()
         val_mean_iou = metrics["mean_iou"]
@@ -448,7 +413,7 @@ class MTLSegformerFinetuner(pl.LightningModule):
         val_per_category_iou = metrics['per_category_iou']
 
         metrics = {"val_loss": avg_val_loss, "val_mean_iou": val_mean_iou,
-                   "val_mean_accuracy": val_mean_accuracy, "val_mean_mse": mse}
+                   "val_mean_accuracy": val_mean_accuracy}
         for i in self.id2label.keys():
             metrics[f"val_{self.id2label[i]}_iou"] = val_per_category_iou[i]
 
@@ -461,13 +426,11 @@ class MTLSegformerFinetuner(pl.LightningModule):
 
     def test_step(self, batch, batch_nb):
 
-        images, masks, seed_count = batch['pixel_values'], batch['labels'], batch['seedCount']
+        images, masks = batch['pixel_values'], batch['labels']
 
-        seg_outputs, clf_outputs = self(images, masks, seed_count)
+        outputs = self(images, masks)
 
-        loss, logits = seg_outputs[0], seg_outputs[1]
-        clf_loss, clf_logits = clf_outputs[0], clf_outputs[1]
-        total_loss = torch.add(loss, clf_loss)
+        loss, logits = outputs[0], outputs[1]
 
         upsampled_logits = nn.functional.interpolate(
             logits,
@@ -482,14 +445,10 @@ class MTLSegformerFinetuner(pl.LightningModule):
             predictions=predicted.detach().cpu().numpy(),
             references=masks.detach().cpu().numpy()
         )
-        self.test_mse.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
-        )
 
-        self.test_step_outputs.append(total_loss)
+        self.test_step_outputs.append(loss)
 
-        return ({'test_loss': total_loss})
+        return ({'test_loss': loss})
 
     def on_test_epoch_end(self):
         outputs = self.test_step_outputs
@@ -503,10 +462,9 @@ class MTLSegformerFinetuner(pl.LightningModule):
         test_mean_iou = metrics["mean_iou"]
         test_mean_accuracy = metrics["mean_accuracy"]
         test_per_category_iou = metrics['per_category_iou']
-        mse = self.test_mse.compute()['mse']
 
         metrics = {"test_loss": avg_test_loss, "test_mean_iou": test_mean_iou,
-                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse}
+                   "test_mean_accuracy": test_mean_accuracy}
         for i in self.id2label.keys():
             metrics[f"test_{self.id2label[i]}_iou"] = test_per_category_iou[i]
 
@@ -566,7 +524,7 @@ val_dataloader = DataLoader(
 test_dataloader = DataLoader(
     test_dataset, batch_size=batch_size, num_workers=num_workers)
 
-mtl_segformer_finetuner = MTLSegformerFinetuner(
+segformer_finetuner = SegformerFinetuner(
     train_dataset.id2label,
     train_dataloader=train_dataloader,
     val_dataloader=val_dataloader,
@@ -593,34 +551,20 @@ trainer = pl.Trainer(
     val_check_interval=len(train_dataloader),
     log_every_n_steps=1
 )
-wandb_logger.experiment.config.update({"model": MODEL_BASE})
+# wandb_logger.experiment.config.update({"model": MODEL_BASE})
 
-trainer.fit(mtl_segformer_finetuner)
+trainer.fit(segformer_finetuner)
 
 
 res = trainer.test(ckpt_path="best")
 
 dataset_image = test_dataset.get_image(0)
 encoded_inputs = test_dataset[0]
-images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
-# outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
-mtl_segformer_finetuner, images, masks, seed_count = mtl_segformer_finetuner.to(
-    device="cuda"), images.to(device="cuda"), masks.to(device="cuda"), seed_count.to(device="cuda")
-seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
-    images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
+images, masks = encoded_inputs['pixel_values'], encoded_inputs['labels']
+outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
 
-loss, logits = seg_outputs[0], seg_outputs[1]
-_, clf_logits = clf_outputs[0], clf_outputs[1]
+loss, logits = outputs[0], outputs[1]
 
-# Seed Count outputs
-columns = ["seed label", "seed prediction"]
-my_data = [[str(seed_count.detach().cpu().numpy()),
-            str(clf_logits.detach().cpu().numpy())]]
-
-# # using columns and data
-wandb_logger.log_text(key="Seed Count", columns=columns, data=my_data)
-
-# Mask outptus
 # First, rescale logits to original image size
 upsampled_logits = nn.functional.interpolate(logits,
                                              # (height, width)
@@ -675,3 +619,44 @@ wandb_logger.log_image("example_image", [dataset_image], caption=["Predicted Mas
                                }
                            }}
 ])
+
+# color_map = {
+#     0: (0, 0, 0),
+#     1: (255, 0, 0),
+#     2: (0, 255, 0),
+#     3: (0, 0, 255),
+#     4: (120, 120, 0),
+# }
+
+
+# def prediction_to_vis(prediction):
+#     vis_shape = prediction.shape + (3,)
+#     vis = np.zeros(vis_shape)
+#     for i, c in color_map.items():
+#         vis[prediction == i] = color_map[i]
+#     return Image.fromarray(vis.astype(np.uint8))
+
+
+# for batch in test_dataloader:
+#     images, masks = batch['pixel_values'], batch['labels']
+#     outputs = segformer_finetuner.model(images, masks)
+
+#     loss, logits = outputs[0], outputs[1]
+
+#     upsampled_logits = nn.functional.interpolate(
+#         logits,
+#         size=masks.shape[-2:],
+#         mode="bilinear",
+#         align_corners=False
+#     )
+#     predicted_mask = upsampled_logits.argmax(dim=1).cpu().numpy()
+#     masks = masks.cpu().numpy()
+
+
+# n_plots = 4
+# f, axarr = plt.subplots(n_plots, 2)
+# f.set_figheight(15)
+# f.set_figwidth(15)
+# for i in range(n_plots):
+#     axarr[i, 0].imshow(prediction_to_vis(predicted_mask[i, :, :]))
+#     axarr[i, 1].imshow(prediction_to_vis(masks[i, :, :]))
