@@ -20,7 +20,6 @@ import wandb
 import sys
 import random
 import yaml
-from torchmetrics.functional.classification import dice
 
 from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, CrossEntropyLoss, SegformerDecodeHead, SegformerModel, SegformerPreTrainedModel, SemanticSegmenterOutput, SegFormerImageClassifierOutput, MSELoss
 from typing import Optional, Tuple, Union

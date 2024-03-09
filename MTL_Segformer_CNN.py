@@ -25,24 +25,26 @@ from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, 
 from typing import Optional, Tuple, Union
 from evaluate import load
 
-# with open('./mtl_segformer_diceloss_config.yaml') as file:
-#     config = yaml.load(file, Loader=yaml.FullLoader)
+with open('./mtl_segformer_diceloss_config.yaml') as file:
+    config = yaml.load(file, Loader=yaml.FullLoader)
 
-# run = wandb.init(config=config)
+run = wandb.init(config=config)
 
 
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
-# wandb_logger = WandbLogger(log_model=True, experiment=run)
-wandb_logger = WandbLogger(project="Delete_Later", offline=True)
-MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
-EPOCHS = 1
-WEIGHTS = None
-# MODEL_BASE = wandb.config.backbone
-# EPOCHS = wandb.config.epochs
-# WEIGHTS = wandb.config.weights
-# WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(device="cuda")
+wandb_logger = WandbLogger(log_model=True, experiment=run)
+# wandb_logger = WandbLogger(project="Delete_Later", offline=True)
+# MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
+# EPOCHS = 1
+MODEL_BASE = wandb.config.backbone
+EPOCHS = wandb.config.epochs
+CNN_HIDDEN_CHANNELS = wandb.config.cnn_hidden_channels
+WEIGHTS = [1,1,1,1,1]
+WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
+    device="cuda") if WEIGHTS != "None" else None
+LOSS = "multi"
 
 data_ids = [mask_id.split(".png")[0]
             for mask_id in os.listdir(SEED_DATA + "Masks")]
@@ -137,7 +139,7 @@ class FocalLoss_MulticlassDiceLoss(nn.Module):
             and does not contribute to the input gradient.
     """
 
-    def __init__(self, num_classes, softmax_dim=None, gamma=2, weight=None, ignore_index=-100):
+    def __init__(self, num_classes, softmax_dim=None, gamma=2, weight=None, ignore_index=-100, loss="multi"):
         super().__init__()
         self.gamma = gamma
         self.weight = weight
@@ -145,37 +147,76 @@ class FocalLoss_MulticlassDiceLoss(nn.Module):
 
         self.num_classes = num_classes
         self.softmax_dim = softmax_dim
+        self.loss_fct = loss
 
     def forward(self, input, target, reduction='mean', smooth=1e-6):
-        # Focal Loss
-        logit = F.log_softmax(input, dim=1)
-        pt = torch.exp(logit)
-        logit = (1 - pt)**self.gamma * logit
-        focal_loss = F.nll_loss(
-            logit, target, self.weight, ignore_index=self.ignore_index)
+        if self.loss_fct == "multi" or self.loss_fct == "focal":
+            # Focal Loss
+            logit = F.log_softmax(input, dim=1)
+            pt = torch.exp(logit)
+            logit = (1 - pt)**self.gamma * logit
+            focal_loss = F.nll_loss(
+                logit, target, self.weight, ignore_index=self.ignore_index)
 
-        # # Dice Loss
-        # probabilities = input
-        # if self.softmax_dim is not None:
-        #     probabilities = nn.Softmax(dim=self.softmax_dim)(input)
-        # # end if
-        # targets_one_hot = F.one_hot(target, num_classes=self.num_classes)
-        # # print(targets_one_hot.shape)
-        # # Convert from NHWC to NCHW
-        # targets_one_hot = targets_one_hot.permute(0, 3, 1, 2)
+        if self.loss_fct == "multi" or self.loss_fct == "dice":
+            targets_one_hot = F.one_hot(
+                target, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+            true_1_hot = targets_one_hot
+            probas = F.softmax(input, dim=1)
+            true_1_hot = true_1_hot.type(input.type())
+            dims = (0,) + tuple(range(2, target.ndimension()))
+            intersection = torch.sum(probas * true_1_hot, dims)
+            cardinality = torch.sum(probas + true_1_hot, dims)
+            dice_coefficient = (2. * intersection /
+                                (cardinality + smooth)).mean()
+            dice_loss = -dice_coefficient.log()
 
-        # # Multiply one-hot encoded ground truth labels with the probabilities to get the
-        # # prredicted probability for the actual class.
-        # intersection = (targets_one_hot * probabilities).sum()
+        total_loss = 0
 
-        # mod_a = intersection.sum()
-        # mod_b = target.numel()
+        if self.loss_fct == "multi" or self.loss_fct == "focal":
+            total_loss = focal_loss
+        if self.loss_fct == "multi" or self.loss_fct == "dice":
+            total_loss += dice_loss
 
-        # dice_coefficient = 2. * intersection / (mod_a + mod_b + smooth)
-        # dice_loss = -dice_coefficient.log()
+        return total_loss
 
-        return focal_loss
 
+class CNNClassifier(nn.Module):
+    def __init__(self, input_channels, output_classes, hidden_sizes, n_cnn_block):
+        super(CNNClassifier, self).__init__()
+        self.n_cnn_block = n_cnn_block
+        self.conv_blocks = self._make_conv_blocks(input_channels, hidden_sizes)
+        self.fc_layers = self._make_fc_layers(hidden_sizes[-1] * 4 * 4, output_classes)
+
+    def _make_conv_blocks(self, input_channels, hidden_sizes):
+        layers = []
+        in_channels = input_channels
+        for i in range(self.n_cnn_block):
+            out_channels = hidden_sizes[i] if i < len(
+                hidden_sizes) else hidden_sizes[-1]
+            layers += [
+                nn.Conv2d(in_channels, out_channels,
+                          kernel_size=1, stride=1, padding=0),
+                nn.ReLU(),
+            ]
+            in_channels = out_channels
+        return nn.Sequential(*layers)
+
+    def _make_fc_layers(self, input_features, output_classes):
+        return nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_features, input_features//2),
+            nn.ReLU(),
+            nn.Linear(input_features//2, output_classes)
+        )
+
+    def forward(self, x):
+        # print("CNN classifier forward")
+        # print(x.shape)
+        x = self.conv_blocks(x)
+        # print(x.shape)
+        x = self.fc_layers(x)
+        return x
 
 class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(SegformerPreTrainedModel):
     def __init__(self, config):
@@ -187,17 +228,25 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
 
         # Classifier head
         self.clf_num_labels = 1
-        print(config)
-        self.classifier = nn.Sequential(nn.Conv2d(256, 256, 1, 1, "same"),
-                                        nn.ReLU(),
-                                        nn.MaxPool2d(kernel_size=2),
-                                        nn.Flatten(),
-                                        nn.Linear(
-                                            1024, 256),
-                                        nn.ReLU(),
-                                        nn.Linear(256, 128),
-                                        nn.ReLU(),
-                                        nn.Linear(128, self.clf_num_labels))
+        self.cnn_classifier = CNNClassifier(
+            self.config.hidden_sizes[-1], self.clf_num_labels, CNN_HIDDEN_CHANNELS, len(CNN_HIDDEN_CHANNELS))
+        # print(self.cnn_classifier.conv_blocks)
+        # print(self.cnn_classifier.fc_layers)
+        # self.classifier = nn.Sequential(nn.Conv2d(self.config.hidden_sizes[-1], 512, 1, 1, "same"),
+        #                                 nn.ReLU(),
+        #                                 nn.MaxPool2d(kernel_size=2),
+        #                                 nn.Conv2d(
+        #                                     512, 256, 1, 1, "same"),
+        #                                 nn.ReLU(),
+        #                                 nn.MaxPool2d(kernel_size=2),
+        #                                 nn.Flatten(),
+        #                                 nn.Linear(
+        #                                     256, 256),
+        #                                 nn.ReLU(),
+        #                                 nn.Linear(256, 128),
+        #                                 nn.ReLU(),
+        #                                 nn.Linear(128, self.clf_num_labels))
+        self.classifier = self.cnn_classifier
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -253,7 +302,7 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
                 # loss_fct = CrossEntropyLoss(
                 #     ignore_index=self.config.semantic_loss_ignore_index)
                 loss_fct = FocalLoss_MulticlassDiceLoss(
-                    num_classes=5, weight=WEIGHTS)
+                    num_classes=5, weight=WEIGHTS, loss=LOSS)
                 loss = loss_fct(upsampled_logits, labels)
             elif self.config.num_labels == 1:
                 valid_mask = ((labels >= 0) & (
