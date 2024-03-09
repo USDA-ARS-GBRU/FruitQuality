@@ -1,0 +1,26 @@
+program: Segformer_weight_normalized.py
+project: Delete_Later
+method: bayes
+name: Segformer Weight normalized and multiple weights
+metric:
+  name: test_mean_iou
+  goal: maximize
+parameters:
+  epochs:
+    distribution: int_uniform
+    min: 50
+    max: 200
+  backbone:
+    values: ["nvidia/segformer-b0-finetuned-ade-512-512", "nvidia/segformer-b1-finetuned-ade-512-512", "nvidia/segformer-b2-finetuned-ade-512-512", "nvidia/segformer-b3-finetuned-ade-512-512", "nvidia/segformer-b4-finetuned-ade-512-512"]
+  weight:
+    distribution: int_uniform
+    min: 1
+    max: 100
+  mask_type:
+    values: ['seed', 'pulp', 'albedo', 'flavedo']
+  loss_fct:
+    values: ['multi', 'focal', 'dice']
+early_terminate:
+  type: hyperband
+  max_iter: 200
+  s: 2
