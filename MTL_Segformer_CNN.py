@@ -34,14 +34,14 @@ run = wandb.init(config=config)
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
-wandb_logger = WandbLogger(log_model=True, experiment=run)
+wandb_logger = WandbLogger(log_model=False, experiment=run)
 # wandb_logger = WandbLogger(project="Delete_Later", offline=True)
 # MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
 # EPOCHS = 1
 MODEL_BASE = wandb.config.backbone
 EPOCHS = wandb.config.epochs
 CNN_HIDDEN_CHANNELS = wandb.config.cnn_hidden_channels
-WEIGHTS = [1,1,1,1,1]
+WEIGHTS = [1, 1, 1, 1, 1]
 WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
     device="cuda") if WEIGHTS != "None" else None
 LOSS = "multi"
@@ -186,7 +186,8 @@ class CNNClassifier(nn.Module):
         super(CNNClassifier, self).__init__()
         self.n_cnn_block = n_cnn_block
         self.conv_blocks = self._make_conv_blocks(input_channels, hidden_sizes)
-        self.fc_layers = self._make_fc_layers(hidden_sizes[-1] * 4 * 4, output_classes)
+        self.fc_layers = self._make_fc_layers(
+            hidden_sizes[-1] * 4 * 4, output_classes)
 
     def _make_conv_blocks(self, input_channels, hidden_sizes):
         layers = []
@@ -217,6 +218,7 @@ class CNNClassifier(nn.Module):
         # print(x.shape)
         x = self.fc_layers(x)
         return x
+
 
 class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(SegformerPreTrainedModel):
     def __init__(self, config):
@@ -399,6 +401,9 @@ class MTLSegformerFinetuner(pl.LightningModule):
         self.val_mse = load("mse")
         self.test_mse = load("mse")
 
+        self.test_mae = load("mae")
+        self.test_corr = load("pearsonr")
+
         self.validation_step_outputs = []
         self.test_step_outputs = []
 
@@ -538,6 +543,14 @@ class MTLSegformerFinetuner(pl.LightningModule):
             predictions=clf_logits.detach().cpu().numpy(),
             references=seed_count.detach().cpu().numpy()
         )
+        self.test_mae.add_batch(
+            predictions=clf_logits.detach().cpu().numpy(),
+            references=seed_count.detach().cpu().numpy()
+        )
+        self.test_corr.add_batch(
+            predictions=clf_logits.detach().cpu().numpy(),
+            references=seed_count.detach().cpu().numpy()
+        )
 
         self.test_step_outputs.append(total_loss)
 
@@ -556,9 +569,12 @@ class MTLSegformerFinetuner(pl.LightningModule):
         test_mean_accuracy = metrics["mean_accuracy"]
         test_per_category_iou = metrics['per_category_iou']
         mse = self.test_mse.compute()['mse']
+        mae = self.test_mae.compute()['mae']
+        corr = self.test_corr.compute()['pearsonr']
 
         metrics = {"test_loss": avg_test_loss, "test_mean_iou": test_mean_iou,
-                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse}
+                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse, 
+                   "test_mean_mae": mae, "test_mean_corr": corr}
         for i in self.id2label.keys():
             metrics[f"test_{self.id2label[i]}_iou"] = test_per_category_iou[i]
 

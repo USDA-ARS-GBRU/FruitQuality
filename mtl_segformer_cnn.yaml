@@ -1,7 +1,7 @@
 program: MTL_Segformer_CNN.py
 project: Segformer_and_MTL_Segformer
 method: grid
-name: MTL_Segformer_CNN
+name: MTL_Segformer_CNN_new_seed_metrics
 metric:
   name: test_mean_iou
   goal: maximize
