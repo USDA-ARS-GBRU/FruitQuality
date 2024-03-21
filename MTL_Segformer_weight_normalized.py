@@ -31,18 +31,29 @@ with open('./mtl_segformer_diceloss_config.yaml') as file:
 run = wandb.init(config=config)
 
 
+def normalize_array(arr):
+    arr_sum = np.sum(arr)
+    normalized_arr = arr / arr_sum
+    return normalized_arr
+
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
-wandb_logger = WandbLogger(log_model=True, experiment=run)
-# wandb_logger = WandbLogger(project="Delete_Later", offline=False)
-# MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
-# EPOCHS = 1
+wandb_logger = WandbLogger(log_model=False, experiment=run)
 MODEL_BASE = wandb.config.backbone 
 EPOCHS = wandb.config.epochs
-WEIGHTS = wandb.config.weights
-WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
-    device="cuda") if WEIGHTS != "None" else None
+WEIGHT = wandb.config.weight
+MASK_TYPE = wandb.config.mask_type
+if WEIGHT == "None" or MASK_TYPE == "None":
+    WEIGHTS = None
+else:
+    MASK_ORDER = ['seed', 'pulp', 'albedo', 'flavedo']
+    idx = MASK_ORDER.index(MASK_TYPE) + 1
+    WEIGHTS = np.array([1] * 5)
+    WEIGHTS[idx] = WEIGHT
+    WEIGHTS = normalize_array(WEIGHTS)
+    WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
+        device="cuda") if WEIGHTS != "None" else None
 LOSS = wandb.config.loss_fct
 
 data_ids = [mask_id.split(".png")[0]

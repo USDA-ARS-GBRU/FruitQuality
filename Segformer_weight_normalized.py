@@ -38,7 +38,7 @@ def normalize_array(arr):
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
-wandb_logger = WandbLogger(log_model=True, experiment=run)
+wandb_logger = WandbLogger(log_model=False, experiment=run)
 MODEL_BASE = wandb.config.backbone 
 EPOCHS = wandb.config.epochs
 WEIGHT = wandb.config.weight

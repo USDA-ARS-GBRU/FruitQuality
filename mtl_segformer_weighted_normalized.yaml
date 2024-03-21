@@ -1,7 +1,7 @@
-program: Segformer_weight_normalized.py
+program: MTL_Segformer_weight_normalized.py
 project: Segformer_and_MTL_Segformer
 method: grid
-name: Segformer Weight normalized and multiple weights
+name: MTL Segformer Weight normalized and multiple weights
 metric:
   name: test_mean_iou
   goal: maximize
