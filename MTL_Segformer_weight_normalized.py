@@ -25,7 +25,7 @@ from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, 
 from typing import Optional, Tuple, Union
 from evaluate import load
 
-with open('./mtl_segformer_diceloss_config.yaml') as file:
+with open('./mtl_segformer_weighted_normalized.yaml') as file:
     config = yaml.load(file, Loader=yaml.FullLoader)
 
 run = wandb.init(config=config)
@@ -46,6 +46,8 @@ WEIGHT = wandb.config.weight
 MASK_TYPE = wandb.config.mask_type
 if WEIGHT == "None" or MASK_TYPE == "None":
     WEIGHTS = None
+elif wandb.config.weights != "None":
+    WEIGHTS = wandb.config.weights
 else:
     MASK_ORDER = ['seed', 'pulp', 'albedo', 'flavedo']
     idx = MASK_ORDER.index(MASK_TYPE) + 1
@@ -56,8 +58,8 @@ else:
         device="cuda") if WEIGHTS != "None" else None
 LOSS = wandb.config.loss_fct
 
-data_ids = [mask_id.split(".png")[0]
-            for mask_id in os.listdir(SEED_DATA + "Masks")]
+data_ids = sorted([mask_id.split(".png")[0]
+            for mask_id in os.listdir(SEED_DATA + "Masks")])
 SIZE = len(data_ids)
 TRAIN_SIZE = int(0.6 * SIZE)
 VAL_SIZE = int(0.2 * SIZE)  # Also Test size
@@ -65,6 +67,26 @@ CLASSES = list(reversed(['seed', 'pulp', 'albedo', 'flavedo']))
 
 batch_size = 8
 num_workers = 4
+# # Unsorted Image IDs
+# image_ids = [
+#     "147",
+#     "141",
+#     "165",
+#     "229",
+#     "234",
+#     "255",
+#     "325"
+# ]
+# Sorted Image IDs
+image_ids = [
+    "281",
+    "285",
+    "291",
+    "313",
+    "322",
+    "345",
+    "347"
+]
 
 
 class SemanticSegmentationDataset(Dataset):
@@ -80,7 +102,7 @@ class SemanticSegmentationDataset(Dataset):
             augmentation=None,
             preprocessing=None,
     ):
-        self.ids = ids
+        self.ids: list = ids
         # self.images_fps = [os.path.join(images_dir, image_id.replace(".png", ""))
 #                           for image_id in self.ids]
         self.images_fps = [os.path.join(
@@ -125,6 +147,12 @@ class SemanticSegmentationDataset(Dataset):
 
     def __len__(self):
         return len(self.ids)
+    
+    def get_idx_of_img_id(self, img_id):
+        try:
+            return self.ids.index(img_id)
+        except ValueError:
+            return -1
 
     def get_image(self, i):
         return Image.open(self.images_fps[i])
@@ -258,10 +286,12 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
                 logits, size=labels.shape[-2:], mode="bilinear", align_corners=False
             )
             if self.config.num_labels > 1:
-                # loss_fct = CrossEntropyLoss(
-                #     ignore_index=self.config.semantic_loss_ignore_index)
-                loss_fct = FocalLoss_MulticlassDiceLoss(
-                    num_classes=5, weight=WEIGHTS, loss=LOSS)
+                if LOSS == 'cross-entropy':
+                    loss_fct = CrossEntropyLoss(
+                        ignore_index=self.config.semantic_loss_ignore_index)
+                else:
+                    loss_fct = FocalLoss_MulticlassDiceLoss(
+                        num_classes=5, weight=WEIGHTS, loss=LOSS)
                 loss = loss_fct(upsampled_logits, labels)
             elif self.config.num_labels == 1:
                 valid_mask = ((labels >= 0) & (
@@ -357,6 +387,9 @@ class MTLSegformerFinetuner(pl.LightningModule):
         self.train_mse = load("mse")
         self.val_mse = load("mse")
         self.test_mse = load("mse")
+
+        self.test_mae = load("mae")
+        self.test_corr = load("pearsonr")
 
         self.validation_step_outputs = []
         self.test_step_outputs = []
@@ -497,6 +530,14 @@ class MTLSegformerFinetuner(pl.LightningModule):
             predictions=clf_logits.detach().cpu().numpy(),
             references=seed_count.detach().cpu().numpy()
         )
+        self.test_mae.add_batch(
+            predictions=clf_logits.detach().cpu().numpy(),
+            references=seed_count.detach().cpu().numpy()
+        )
+        self.test_corr.add_batch(
+            predictions=clf_logits.detach().cpu().numpy(),
+            references=seed_count.detach().cpu().numpy()
+        )
 
         self.test_step_outputs.append(total_loss)
 
@@ -515,9 +556,13 @@ class MTLSegformerFinetuner(pl.LightningModule):
         test_mean_accuracy = metrics["mean_accuracy"]
         test_per_category_iou = metrics['per_category_iou']
         mse = self.test_mse.compute()['mse']
+        mae = self.test_mae.compute()['mae']
+        corr = self.test_corr.compute()['pearsonr']
+
 
         metrics = {"test_loss": avg_test_loss, "test_mean_iou": test_mean_iou,
-                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse}
+                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse,
+                   "test_mean_mae": mae, "test_mean_corr": corr}
         for i in self.id2label.keys():
             metrics[f"test_{self.id2label[i]}_iou"] = test_per_category_iou[i]
 
@@ -610,79 +655,92 @@ trainer.fit(mtl_segformer_finetuner)
 
 
 res = trainer.test(ckpt_path="best")
+mtl_segformer_finetuner = mtl_segformer_finetuner.to(device="cuda")
 
-dataset_image = test_dataset.get_image(0)
-encoded_inputs = test_dataset[0]
-images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
-# outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
-mtl_segformer_finetuner, images, masks, seed_count = mtl_segformer_finetuner.to(
-    device="cuda"), images.to(device="cuda"), masks.to(device="cuda"), seed_count.to(device="cuda")
-seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
-    images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
+def run_sample_output(img_id):
+    idx_in_test_set = test_dataset.get_idx_of_img_id(img_id)
+    if idx_in_test_set == -1:
+        return None
+    dataset_image = test_dataset.get_image(idx_in_test_set)
+    encoded_inputs = test_dataset[idx_in_test_set]
+    images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
+    # outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
+    images, masks, seed_count = images.to(device="cuda"), masks.to(device="cuda"), seed_count.to(device="cuda")
+    seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
+        images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
 
-loss, logits = seg_outputs[0], seg_outputs[1]
-_, clf_logits = clf_outputs[0], clf_outputs[1]
+    _, logits = seg_outputs[0], seg_outputs[1]
+    _, clf_logits = clf_outputs[0], clf_outputs[1]
 
-# Seed Count outputs
-columns = ["seed label", "seed prediction"]
-my_data = [[str(seed_count.detach().cpu().numpy()),
-            str(clf_logits.detach().cpu().numpy())]]
+    # Seed Count outputs 
+    my_data = [img_id, 
+               str(seed_count.detach().cpu().numpy()),
+               str(clf_logits.detach().cpu().numpy())]
 
-# # using columns and data
-wandb_logger.log_text(key="Seed Count", columns=columns, data=my_data)
+    # Mask outptus
+    # First, rescale logits to original image size
+    upsampled_logits = nn.functional.interpolate(logits,
+                                                # (height, width)
+                                                size=dataset_image.size[::-1],
+                                                mode='bilinear',
+                                                align_corners=False)
 
-# Mask outptus
-# First, rescale logits to original image size
-upsampled_logits = nn.functional.interpolate(logits,
-                                             # (height, width)
-                                             size=dataset_image.size[::-1],
-                                             mode='bilinear',
-                                             align_corners=False)
+    # Second, apply argmax on the class dimension
+    seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
 
-# Second, apply argmax on the class dimension
-seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
-
-# wandb_image = wandb.Image(dataset_image, caption="Input image")
-wandb_logger.log_image(
-    "example_image", [dataset_image], caption=["Input image"])
+    # wandb_image = wandb.Image(dataset_image, caption="Input image")
+    wandb_logger.log_image(
+        img_id, [dataset_image], caption=["Input image"])
 
 
-# Change pixel order to be seed, pulp, albedo, flavedo, background
-ground_truth_mask = (np.array(test_dataset.get_mask(0)) // 51)
-tmp_gt_mask = ground_truth_mask + 10
-# Dont change order here
-tmp_gt_mask = np.where(tmp_gt_mask == 10, 4, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 14, 0, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 13, 1, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 12, 2, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 11, 3, tmp_gt_mask)
-ground_truth_mask = tmp_gt_mask
-wandb_logger.log_image("example_image", [dataset_image], caption=["True Masks"],
-                       masks=[{
-                           "ground_truth": {
-                               "mask_data": ground_truth_mask.squeeze(),
-                               "class_labels": {4: "Background",
-                                                0: "Seed",
-                                                1: "Pulp",
-                                                2: "Albedo",
-                                                3: "Flavedo"
-                                                }
-                           }}
-])
+    # Change pixel order to be seed, pulp, albedo, flavedo, background
+    ground_truth_mask = (np.array(test_dataset.get_mask(idx_in_test_set)) // 51)
+    tmp_gt_mask = ground_truth_mask + 10
+    # Dont change order here
+    tmp_gt_mask = np.where(tmp_gt_mask == 10, 4, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 14, 0, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 13, 1, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 12, 2, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 11, 3, tmp_gt_mask)
+    ground_truth_mask = tmp_gt_mask
+    wandb_logger.log_image(img_id, [dataset_image], caption=["True Masks"],
+                        masks=[{
+                            "ground_truth": {
+                                "mask_data": ground_truth_mask.squeeze(),
+                                "class_labels": {4: "Background",
+                                                    0: "Seed",
+                                                    1: "Pulp",
+                                                    2: "Albedo",
+                                                    3: "Flavedo"
+                                                    }
+                            }}
+    ])
 
-# Change pixel order to be Background, seed, pulp, albedo, flavedo
-# tmp_seg = seg + 1
-# seg = np.where(tmp_seg == 5, 0, tmp_seg)
-wandb_logger.log_image("example_image", [dataset_image], caption=["Predicted Masks"],
-                       masks=[{
-                           "predicted_mask": {
-                               "mask_data": seg.squeeze(),
-                               "class_labels": {
-                                   0: "Seed",
-                                   1: "Pulp",
-                                   2: "Albedo",
-                                   3: "Flavedo",
-                                   4: "Background",
-                               }
-                           }}
-])
+    # Change pixel order to be Background, seed, pulp, albedo, flavedo
+    # tmp_seg = seg + 1
+    # seg = np.where(tmp_seg == 5, 0, tmp_seg)
+    wandb_logger.log_image(img_id, [dataset_image], caption=["Predicted Masks"],
+                        masks=[{
+                            "predicted_mask": {
+                                "mask_data": seg.squeeze(),
+                                "class_labels": {
+                                    0: "Seed",
+                                    1: "Pulp",
+                                    2: "Albedo",
+                                    3: "Flavedo",
+                                    4: "Background",
+                                }
+                            }}
+    ])
+
+    return my_data
+
+columns = ["image id", "seed label", "seed prediction"]
+seed_count_data = []
+for img_id in image_ids:
+    seed_data = run_sample_output(img_id)
+    if seed_data:
+        seed_count_data.append(seed_data)
+
+# using columns and data
+wandb_logger.log_text(key="Seed Count", columns=columns, data=seed_count_data)
