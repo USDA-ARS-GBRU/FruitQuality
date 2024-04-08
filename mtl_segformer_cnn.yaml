@@ -1,7 +1,7 @@
 program: MTL_Segformer_CNN.py
 project: Segformer_and_MTL_Segformer
 method: grid
-name: MTL_Segformer_CNN_new_seed_metrics
+name: MTL_Segformer_CNN
 metric:
   name: test_mean_iou
   goal: maximize
@@ -11,4 +11,4 @@ parameters:
   backbone:
     values: ["nvidia/segformer-b0-finetuned-ade-512-512", "nvidia/segformer-b1-finetuned-ade-512-512", "nvidia/segformer-b2-finetuned-ade-512-512", "nvidia/segformer-b3-finetuned-ade-512-512", "nvidia/segformer-b4-finetuned-ade-512-512"]
   cnn_hidden_channels:
-    values: [[512], [256], [128], [512,256], [256, 128], [512,256,128]]
+    values: [[512,256,128], [512,512,256], [512,512,512], [512,512,1024], [256,128,64], [256,256,128], [256,256,256], [256,256,512]]

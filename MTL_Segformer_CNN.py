@@ -25,7 +25,7 @@ from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, 
 from typing import Optional, Tuple, Union
 from evaluate import load
 
-with open('./mtl_segformer_diceloss_config.yaml') as file:
+with open('./mtl_segformer_cnn.yaml') as file:
     config = yaml.load(file, Loader=yaml.FullLoader)
 
 run = wandb.init(config=config)
@@ -55,7 +55,26 @@ CLASSES = list(reversed(['seed', 'pulp', 'albedo', 'flavedo']))
 
 batch_size = 8
 num_workers = 4
-
+# Unsorted Image IDs
+image_ids = [
+    "147",
+    "141",
+    "165",
+    "229",
+    "234",
+    "255",
+    "325"
+]
+# # Sorted Image IDs
+# image_ids = [
+#     "281",
+#     "285",
+#     "291",
+#     "313",
+#     "322",
+#     "345",
+#     "347"
+# ]
 
 class SemanticSegmentationDataset(Dataset):
     CLASSES = ['unlabelled', 'seed', 'pulp', 'albedo', 'flavedo']
@@ -115,6 +134,12 @@ class SemanticSegmentationDataset(Dataset):
 
     def __len__(self):
         return len(self.ids)
+    
+    def get_idx_of_img_id(self, img_id):
+        try:
+            return self.ids.index(img_id)
+        except ValueError:
+            return -1
 
     def get_image(self, i):
         return Image.open(self.images_fps[i])
@@ -668,119 +693,95 @@ trainer.fit(mtl_segformer_finetuner)
 
 res = trainer.test(ckpt_path="best")
 
-dataset_image = test_dataset.get_image(0)
-encoded_inputs = test_dataset[0]
-images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
-# outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
-mtl_segformer_finetuner, images, masks, seed_count = mtl_segformer_finetuner.to(
-    device="cuda"), images.to(device="cuda"), masks.to(device="cuda"), seed_count.to(device="cuda")
-seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
-    images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
-
-loss, logits = seg_outputs[0], seg_outputs[1]
-_, clf_logits = clf_outputs[0], clf_outputs[1]
-
-# Seed Count outputs
-columns = ["seed label", "seed prediction"]
-my_data = [[str(seed_count.detach().cpu().numpy()),
-            str(clf_logits.detach().cpu().numpy())]]
-
-# # using columns and data
-wandb_logger.log_text(key="Seed Count", columns=columns, data=my_data)
-
-# Mask outptus
-# First, rescale logits to original image size
-upsampled_logits = nn.functional.interpolate(logits,
-                                             # (height, width)
-                                             size=dataset_image.size[::-1],
-                                             mode='bilinear',
-                                             align_corners=False)
-
-# Second, apply argmax on the class dimension
-seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
-
-# wandb_image = wandb.Image(dataset_image, caption="Input image")
-wandb_logger.log_image(
-    "example_image", [dataset_image], caption=["Input image"])
+mtl_segformer_finetuner = mtl_segformer_finetuner.to(device="cuda")
 
 
-# Change pixel order to be seed, pulp, albedo, flavedo, background
-ground_truth_mask = (np.array(test_dataset.get_mask(0)) // 51)
-tmp_gt_mask = ground_truth_mask + 10
-# Dont change order here
-tmp_gt_mask = np.where(tmp_gt_mask == 10, 4, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 14, 0, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 13, 1, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 12, 2, tmp_gt_mask)
-tmp_gt_mask = np.where(tmp_gt_mask == 11, 3, tmp_gt_mask)
-ground_truth_mask = tmp_gt_mask
-wandb_logger.log_image("example_image", [dataset_image], caption=["True Masks"],
-                       masks=[{
-                           "ground_truth": {
-                               "mask_data": ground_truth_mask.squeeze(),
-                               "class_labels": {4: "Background",
-                                                0: "Seed",
-                                                1: "Pulp",
-                                                2: "Albedo",
-                                                3: "Flavedo"
-                                                }
-                           }}
-])
+def run_sample_output(img_id):
+    idx_in_test_set = test_dataset.get_idx_of_img_id(img_id)
+    if idx_in_test_set == -1:
+        return None
+    dataset_image = test_dataset.get_image(idx_in_test_set)
+    encoded_inputs = test_dataset[idx_in_test_set]
+    images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
+    # outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
+    images, masks, seed_count = images.to(device="cuda"), masks.to(
+        device="cuda"), seed_count.to(device="cuda")
+    seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
+        images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
 
-# Change pixel order to be Background, seed, pulp, albedo, flavedo
-# tmp_seg = seg + 1
-# seg = np.where(tmp_seg == 5, 0, tmp_seg)
-wandb_logger.log_image("example_image", [dataset_image], caption=["Predicted Masks"],
-                       masks=[{
-                           "predicted_mask": {
-                               "mask_data": seg.squeeze(),
-                               "class_labels": {
-                                   0: "Seed",
-                                   1: "Pulp",
-                                   2: "Albedo",
-                                   3: "Flavedo",
-                                   4: "Background",
-                               }
-                           }}
-])
+    _, logits = seg_outputs[0], seg_outputs[1]
+    _, clf_logits = clf_outputs[0], clf_outputs[1]
 
-# color_map = {
-#     0: (0, 0, 0),
-#     1: (255, 0, 0),
-#     2: (0, 255, 0),
-#     3: (0, 0, 255),
-#     4: (120, 120, 0),
-# }
+    # Seed Count outputs
+    my_data = [img_id,
+               str(seed_count.detach().cpu().numpy()),
+               str(clf_logits.detach().cpu().numpy())]
+
+    # Mask outptus
+    # First, rescale logits to original image size
+    upsampled_logits = nn.functional.interpolate(logits,
+                                                 # (height, width)
+                                                 size=dataset_image.size[::-1],
+                                                 mode='bilinear',
+                                                 align_corners=False)
+
+    # Second, apply argmax on the class dimension
+    seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
+
+    # wandb_image = wandb.Image(dataset_image, caption="Input image")
+    wandb_logger.log_image(
+        img_id, [dataset_image], caption=["Input image"])
+
+    # Change pixel order to be seed, pulp, albedo, flavedo, background
+    ground_truth_mask = (
+        np.array(test_dataset.get_mask(idx_in_test_set)) // 51)
+    tmp_gt_mask = ground_truth_mask + 10
+    # Dont change order here
+    tmp_gt_mask = np.where(tmp_gt_mask == 10, 4, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 14, 0, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 13, 1, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 12, 2, tmp_gt_mask)
+    tmp_gt_mask = np.where(tmp_gt_mask == 11, 3, tmp_gt_mask)
+    ground_truth_mask = tmp_gt_mask
+    wandb_logger.log_image(img_id, [dataset_image], caption=["True Masks"],
+                           masks=[{
+                               "ground_truth": {
+                                   "mask_data": ground_truth_mask.squeeze(),
+                                   "class_labels": {4: "Background",
+                                                    0: "Seed",
+                                                    1: "Pulp",
+                                                    2: "Albedo",
+                                                    3: "Flavedo"
+                                                    }
+                               }}
+    ])
+
+    # Change pixel order to be Background, seed, pulp, albedo, flavedo
+    # tmp_seg = seg + 1
+    # seg = np.where(tmp_seg == 5, 0, tmp_seg)
+    wandb_logger.log_image(img_id, [dataset_image], caption=["Predicted Masks"],
+                           masks=[{
+                               "predicted_mask": {
+                                   "mask_data": seg.squeeze(),
+                                   "class_labels": {
+                                       0: "Seed",
+                                       1: "Pulp",
+                                       2: "Albedo",
+                                       3: "Flavedo",
+                                       4: "Background",
+                                   }
+                               }}
+    ])
+
+    return my_data
 
 
-# def prediction_to_vis(prediction):
-#     vis_shape = prediction.shape + (3,)
-#     vis = np.zeros(vis_shape)
-#     for i, c in color_map.items():
-#         vis[prediction == i] = color_map[i]
-#     return Image.fromarray(vis.astype(np.uint8))
+columns = ["image id", "seed label", "seed prediction"]
+seed_count_data = []
+for img_id in image_ids:
+    seed_data = run_sample_output(img_id)
+    if seed_data:
+        seed_count_data.append(seed_data)
 
-
-# for batch in test_dataloader:
-#     images, masks = batch['pixel_values'], batch['labels']
-#     outputs = segformer_finetuner.model(images, masks)
-
-#     loss, logits = outputs[0], outputs[1]
-
-#     upsampled_logits = nn.functional.interpolate(
-#         logits,
-#         size=masks.shape[-2:],
-#         mode="bilinear",
-#         align_corners=False
-#     )
-#     predicted_mask = upsampled_logits.argmax(dim=1).cpu().numpy()
-#     masks = masks.cpu().numpy()
-
-
-# n_plots = 4
-# f, axarr = plt.subplots(n_plots, 2)
-# f.set_figheight(15)
-# f.set_figwidth(15)
-# for i in range(n_plots):
-#     axarr[i, 0].imshow(prediction_to_vis(predicted_mask[i, :, :]))
-#     axarr[i, 1].imshow(prediction_to_vis(masks[i, :, :]))
+# using columns and data
+wandb_logger.log_text(key="Seed Count", columns=columns, data=seed_count_data)
