@@ -20,13 +20,12 @@ import wandb
 import sys
 import random
 import yaml
-from collections import defaultdict
 
 from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, CrossEntropyLoss, SegformerDecodeHead, SegformerModel, SegformerPreTrainedModel, SemanticSegmenterOutput, SegFormerImageClassifierOutput, MSELoss
 from typing import Optional, Tuple, Union
 from evaluate import load
 
-with open('./mtl_segformer_weighted_normalized.yaml') as file:
+with open('./mtl_segformer_classification.yaml') as file:
     config = yaml.load(file, Loader=yaml.FullLoader)
 
 run = wandb.init(config=config)
@@ -37,14 +36,18 @@ def normalize_array(arr):
     normalized_arr = arr / arr_sum
     return normalized_arr
 
+
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
 wandb_logger = WandbLogger(log_model=False, experiment=run)
-MODEL_BASE = wandb.config.backbone 
+# wandb_logger = WandbLogger(log_model=False, offline=True)
+# MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
+MODEL_BASE = wandb.config.backbone
+# EPOCHS = 50
 EPOCHS = wandb.config.epochs
-WEIGHT = wandb.config.weight
-MASK_TYPE = wandb.config.mask_type
+WEIGHT = "None"
+MASK_TYPE = "None"
 if WEIGHT == "None" or MASK_TYPE == "None":
     WEIGHTS = None
 elif wandb.config.weights != "None":
@@ -57,8 +60,11 @@ else:
     WEIGHTS = normalize_array(WEIGHTS)
     WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
         device="cuda") if WEIGHTS != "None" else None
-LOSS = wandb.config.loss_fct
-PREPROCESS_SIZE = wandb.config.preprocess_size
+LOSS = "multi"
+# LOSS = wandb.config.loss_fct
+USE_CROSS_ENTROPY_WEIGHTS = True if wandb.config.use_cross_entropy_weights == "true" else False
+
+CLF_NUM_LABELS = 30
 
 data_ids = ([mask_id.split(".png")[0]
             for mask_id in os.listdir(SEED_DATA + "Masks")])
@@ -139,17 +145,18 @@ class SemanticSegmentationDataset(Dataset):
             image, segmentation_map, return_tensors="pt")
         encoded_inputs['labels'] //= 51
         encoded_inputs['labels'] -= 1
+        encoded_inputs['seedCount'] = torch.nn.functional.one_hot(
+            torch.tensor([meta_data['seedCount']]), num_classes=CLF_NUM_LABELS).long()
 
         for k, v in encoded_inputs.items():
             encoded_inputs[k].squeeze_()  # remove batch dimension
 
-        encoded_inputs['seedCount'] = torch.tensor([meta_data['seedCount']])
 
         return encoded_inputs
 
     def __len__(self):
         return len(self.ids)
-    
+
     def get_idx_of_img_id(self, img_id):
         try:
             return self.ids.index(img_id)
@@ -230,12 +237,13 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
         self.num_labels = config.num_labels
 
         # Classifier head
-        self.clf_num_labels = 1
+        self.clf_num_labels = CLF_NUM_LABELS
         self.classifier = nn.Sequential(nn.Linear(config.hidden_sizes[-1], 256),
                                         nn.ReLU(),
                                         nn.Linear(256, 128),
                                         nn.ReLU(),
-                                        nn.Linear(128, self.clf_num_labels))
+                                        nn.Linear(128, self.clf_num_labels),
+                                        )     
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -244,7 +252,7 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
         self,
         pixel_values: torch.FloatTensor,
         labels: Optional[torch.LongTensor] = None,
-        seed_count=None, 
+        seed_count=None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -304,7 +312,7 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
             else:
                 raise ValueError(
                     f"Number of labels should be >=0: {self.config.num_labels}")
-            
+
             # Classification stuff
             if self.config.problem_type is None:
                 if self.clf_num_labels == 1:
@@ -322,9 +330,18 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
                 else:
                     cl_loss = loss_fct(cl_logits, seed_count)
             elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
+                if USE_CROSS_ENTROPY_WEIGHTS:
+                    weight = torch.Tensor([0.03978709, 0.03672655, 0.03526281, 0.03872255, 0.03832335, 0.0409847,
+                                        0.04204923, 0.04284764, 0.04364604, 0.04391218, 0.04404524, 0.04391218,
+                                        0.04404524, 0.04391218, 0.02222222, 0.02222222, 0.02222222, 0.02222222,
+                                        0.02222222, 0.04431138, 0.02222222, 0.02222222, 0.02222222, 0.02222222,
+                                        0.02222222, 0.02222222, 0.02222222, 0.04431138, 0.04431138, 0.02222222], device="cpu")
+                    weight = weight.to(device="cuda")
+                else:
+                    weight = None
+                loss_fct = CrossEntropyLoss(weight=weight)
                 cl_loss = loss_fct(
-                    cl_logits.view(-1, self.clf_num_labels), seed_count.view(-1))
+                    cl_logits.view(-1, self.clf_num_labels), seed_count.view(-1, self.clf_num_labels).float())
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 cl_loss = loss_fct(cl_logits, seed_count)
@@ -393,11 +410,10 @@ class MTLSegformerFinetuner(pl.LightningModule):
         self.test_mae = load("mae")
         self.test_corr = load("pearsonr")
 
+        self.softmax_fn = nn.Softmax(dim=1)
+
         self.validation_step_outputs = []
         self.test_step_outputs = []
-
-        self.gt_pixel_density = defaultdict(lambda: 0)
-        self.pred_pixel_density = defaultdict(lambda: 0)
 
     def forward(self, images, masks, seed_count):
         seg_outputs, clf_outputs = self.model(
@@ -408,10 +424,11 @@ class MTLSegformerFinetuner(pl.LightningModule):
 
         images, masks, seed_count = batch['pixel_values'], batch['labels'], batch['seedCount']
 
-        seg_outputs, clf_outputs = self(images, masks, seed_count)      
+        seg_outputs, clf_outputs = self(images, masks, seed_count)
 
         loss, logits = seg_outputs[0], seg_outputs[1]
         clf_loss, clf_logits = clf_outputs[0], clf_outputs[1]
+        clf_logits = self.softmax_fn(clf_logits)
         total_loss = torch.add(loss, clf_loss)
 
         upsampled_logits = nn.functional.interpolate(
@@ -428,8 +445,8 @@ class MTLSegformerFinetuner(pl.LightningModule):
             references=masks.detach().cpu().numpy()
         )
         self.train_mse.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
+            predictions=clf_logits.detach().cpu().numpy().argmax(axis=1).tolist(),
+            references=seed_count.detach().cpu().numpy().argmax(axis=1).tolist()
         )
         if batch_nb % self.metrics_interval == 0:
 
@@ -458,6 +475,7 @@ class MTLSegformerFinetuner(pl.LightningModule):
 
         loss, logits = seg_outputs[0], seg_outputs[1]
         clf_loss, clf_logits = clf_outputs[0], clf_outputs[1]
+        clf_logits = self.softmax_fn(clf_logits)
         total_loss = torch.add(loss, clf_loss)
 
         upsampled_logits = nn.functional.interpolate(
@@ -474,9 +492,10 @@ class MTLSegformerFinetuner(pl.LightningModule):
             references=masks.detach().cpu().numpy()
         )
         self.val_mse.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
+            predictions=clf_logits.detach().cpu().numpy().argmax(axis=1).tolist(),
+            references=seed_count.detach().cpu().numpy().argmax(axis=1).tolist()
         )
+        # print(clf_logits.detach().cpu().numpy().argmax(axis=1).tolist())
 
         self.validation_step_outputs.append(total_loss)
 
@@ -516,6 +535,7 @@ class MTLSegformerFinetuner(pl.LightningModule):
 
         loss, logits = seg_outputs[0], seg_outputs[1]
         clf_loss, clf_logits = clf_outputs[0], clf_outputs[1]
+        clf_logits = self.softmax_fn(clf_logits)
         total_loss = torch.add(loss, clf_loss)
 
         upsampled_logits = nn.functional.interpolate(
@@ -532,39 +552,23 @@ class MTLSegformerFinetuner(pl.LightningModule):
             references=masks.detach().cpu().numpy()
         )
         self.test_mse.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
+            predictions=clf_logits.detach().cpu().numpy().argmax(axis=1).tolist(),
+            references=seed_count.detach().cpu().numpy().argmax(axis=1).tolist()
         )
         self.test_mae.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
+            predictions=clf_logits.detach().cpu().numpy().argmax(axis=1).tolist(),
+            references=seed_count.detach().cpu().numpy().argmax(axis=1).tolist()
         )
         self.test_corr.add_batch(
-            predictions=clf_logits.detach().cpu().numpy(),
-            references=seed_count.detach().cpu().numpy()
+            predictions=clf_logits.detach().cpu().numpy().argmax(axis=1).tolist(),
+            references=seed_count.detach().cpu().numpy().argmax(axis=1).tolist()
         )
-        # Ground truth pixel density
-        pixel_labels = masks.detach().cpu().numpy()
-        unique, counts = np.unique(pixel_labels, return_counts=True)
-        for pixel_val, count in zip(unique, counts):
-            self.gt_pixel_density[pixel_val] += count
-        # Predicted pixel density
-        pixel_labels = predicted.detach().cpu().numpy()
-        unique, counts = np.unique(pixel_labels, return_counts=True)
-        for pixel_val, count in zip(unique, counts):
-            self.pred_pixel_density[pixel_val] += count
 
+        print(clf_logits.detach().cpu().numpy().argmax(axis=1).tolist())
+        print(seed_count.detach().cpu().numpy().argmax(axis=1).tolist())
         self.test_step_outputs.append(total_loss)
 
         return ({'test_loss': total_loss})
-
-    def get_seed_to_fruit_ratio(self, pixel_density: dict, idx: int):
-        try:
-            return pixel_density.get(idx) / sum(pixel_density.values())
-        except TypeError as e:
-            print(e)
-            print(pixel_density, idx)
-            return None
 
     def on_test_epoch_end(self):
         outputs = self.test_step_outputs
@@ -581,18 +585,10 @@ class MTLSegformerFinetuner(pl.LightningModule):
         mse = self.test_mse.compute()['mse']
         mae = self.test_mae.compute()['mae']
         corr = self.test_corr.compute()['pearsonr']
-        # GT {0: Background, 4: Seed, 3: Pulp, 2: Albedo, 1: Flavedo}
-        gt_seed_to_fruit_ratio = self.get_seed_to_fruit_ratio(
-            self.gt_pixel_density, 4)
-        # Pred {4: Background, 0: Seed, 1: Pulp, 2: Albedo, 3: Flavedo}
-        pred_seed_to_fruit_ratio = self.get_seed_to_fruit_ratio(
-            self.pred_pixel_density, 0)
 
         metrics = {"test_loss": avg_test_loss, "test_mean_iou": test_mean_iou,
                    "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse,
-                   "test_mean_mae": mae, "test_mean_corr": corr,
-                   "test_gt_seed_to_fruit_ratio": gt_seed_to_fruit_ratio,
-                   "test_pred_seed_to_fruit_ratio": pred_seed_to_fruit_ratio}
+                   "test_mean_mae": mae, "test_mean_corr": corr}
         for i in self.id2label.keys():
             metrics[f"test_{self.id2label[i]}_iou"] = test_per_category_iou[i]
 
@@ -600,8 +596,6 @@ class MTLSegformerFinetuner(pl.LightningModule):
             self.log(k, v, prog_bar=True)
 
         self.test_step_outputs.clear()
-        self.gt_pixel_density.clear()
-        self.pred_pixel_density.clear()
 
         return metrics
 
@@ -621,7 +615,7 @@ class MTLSegformerFinetuner(pl.LightningModule):
 feature_extractor = SegformerFeatureExtractor.from_pretrained(
     MODEL_BASE)
 feature_extractor.reduce_labels = False
-feature_extractor.size = PREPROCESS_SIZE
+feature_extractor.size = 128
 
 
 train_dataset = SemanticSegmentationDataset(
@@ -681,13 +675,14 @@ trainer = pl.Trainer(
     val_check_interval=len(train_dataloader),
     log_every_n_steps=1
 )
-wandb_logger.experiment.config.update({"model": MODEL_BASE})
+# wandb_logger.experiment.config.update({"model": MODEL_BASE})
 
 trainer.fit(mtl_segformer_finetuner)
 
 
 res = trainer.test(ckpt_path="best")
 mtl_segformer_finetuner = mtl_segformer_finetuner.to(device="cuda")
+
 
 def run_sample_output(img_id):
     idx_in_test_set = test_dataset.get_idx_of_img_id(img_id)
@@ -697,25 +692,26 @@ def run_sample_output(img_id):
     encoded_inputs = test_dataset[idx_in_test_set]
     images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
     # outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
-    images, masks, seed_count = images.to(device="cuda"), masks.to(device="cuda"), seed_count.to(device="cuda")
+    images, masks, seed_count = images.to(device="cuda"), masks.to(
+        device="cuda"), seed_count.to(device="cuda")
     seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
         images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
 
     _, logits = seg_outputs[0], seg_outputs[1]
     _, clf_logits = clf_outputs[0], clf_outputs[1]
 
-    # Seed Count outputs 
-    my_data = [img_id, 
-               str(seed_count.detach().cpu().numpy()),
-               str(clf_logits.detach().cpu().numpy())]
+    # Seed Count outputs
+    my_data = [img_id,
+               str(seed_count.detach().cpu().numpy().argmax(axis=0).tolist()),
+               str(clf_logits.detach().cpu().numpy().argmax(axis=1).tolist()[0])]
 
     # Mask outptus
     # First, rescale logits to original image size
     upsampled_logits = nn.functional.interpolate(logits,
-                                                # (height, width)
-                                                size=dataset_image.size[::-1],
-                                                mode='bilinear',
-                                                align_corners=False)
+                                                 # (height, width)
+                                                 size=dataset_image.size[::-1],
+                                                 mode='bilinear',
+                                                 align_corners=False)
 
     # Second, apply argmax on the class dimension
     seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
@@ -724,9 +720,9 @@ def run_sample_output(img_id):
     wandb_logger.log_image(
         img_id, [dataset_image], caption=["Input image"])
 
-
     # Change pixel order to be seed, pulp, albedo, flavedo, background
-    ground_truth_mask = (np.array(test_dataset.get_mask(idx_in_test_set)) // 51)
+    ground_truth_mask = (
+        np.array(test_dataset.get_mask(idx_in_test_set)) // 51)
     tmp_gt_mask = ground_truth_mask + 10
     # Dont change order here
     tmp_gt_mask = np.where(tmp_gt_mask == 10, 4, tmp_gt_mask)
@@ -736,36 +732,37 @@ def run_sample_output(img_id):
     tmp_gt_mask = np.where(tmp_gt_mask == 11, 3, tmp_gt_mask)
     ground_truth_mask = tmp_gt_mask
     wandb_logger.log_image(img_id, [dataset_image], caption=["True Masks"],
-                        masks=[{
-                            "ground_truth": {
-                                "mask_data": ground_truth_mask.squeeze(),
-                                "class_labels": {4: "Background",
+                           masks=[{
+                               "ground_truth": {
+                                   "mask_data": ground_truth_mask.squeeze(),
+                                   "class_labels": {4: "Background",
                                                     0: "Seed",
                                                     1: "Pulp",
                                                     2: "Albedo",
                                                     3: "Flavedo"
                                                     }
-                            }}
+                               }}
     ])
 
     # Change pixel order to be Background, seed, pulp, albedo, flavedo
     # tmp_seg = seg + 1
     # seg = np.where(tmp_seg == 5, 0, tmp_seg)
     wandb_logger.log_image(img_id, [dataset_image], caption=["Predicted Masks"],
-                        masks=[{
-                            "predicted_mask": {
-                                "mask_data": seg.squeeze(),
-                                "class_labels": {
-                                    0: "Seed",
-                                    1: "Pulp",
-                                    2: "Albedo",
-                                    3: "Flavedo",
-                                    4: "Background",
-                                }
-                            }}
+                           masks=[{
+                               "predicted_mask": {
+                                   "mask_data": seg.squeeze(),
+                                   "class_labels": {
+                                       0: "Seed",
+                                       1: "Pulp",
+                                       2: "Albedo",
+                                       3: "Flavedo",
+                                       4: "Background",
+                                   }
+                               }}
     ])
 
     return my_data
+
 
 columns = ["image id", "seed label", "seed prediction"]
 seed_count_data = []

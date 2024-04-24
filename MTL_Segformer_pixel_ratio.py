@@ -26,10 +26,10 @@ from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, 
 from typing import Optional, Tuple, Union
 from evaluate import load
 
-with open('./mtl_segformer_weighted_normalized.yaml') as file:
-    config = yaml.load(file, Loader=yaml.FullLoader)
+# with open('./mtl_segformer_weighted_normalized.yaml') as file:
+#     config = yaml.load(file, Loader=yaml.FullLoader)
 
-run = wandb.init(config=config)
+# run = wandb.init(config=config)
 
 
 def normalize_array(arr):
@@ -40,15 +40,16 @@ def normalize_array(arr):
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
-wandb_logger = WandbLogger(log_model=False, experiment=run)
-MODEL_BASE = wandb.config.backbone 
-EPOCHS = wandb.config.epochs
-WEIGHT = wandb.config.weight
-MASK_TYPE = wandb.config.mask_type
+# wandb_logger = WandbLogger(log_model=False, experiment=run)
+wandb_logger = WandbLogger(offline=True)
+MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
+EPOCHS = 1
+WEIGHT = "None"
+MASK_TYPE = "None"
 if WEIGHT == "None" or MASK_TYPE == "None":
     WEIGHTS = None
-elif wandb.config.weights != "None":
-    WEIGHTS = wandb.config.weights
+# elif wandb.config.weights != "None":
+#     WEIGHTS = wandb.config.weights
 else:
     MASK_ORDER = ['seed', 'pulp', 'albedo', 'flavedo']
     idx = MASK_ORDER.index(MASK_TYPE) + 1
@@ -57,8 +58,8 @@ else:
     WEIGHTS = normalize_array(WEIGHTS)
     WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
         device="cuda") if WEIGHTS != "None" else None
-LOSS = wandb.config.loss_fct
-PREPROCESS_SIZE = wandb.config.preprocess_size
+LOSS = "multi"
+PREPROCESS_SIZE = 128
 
 data_ids = ([mask_id.split(".png")[0]
             for mask_id in os.listdir(SEED_DATA + "Masks")])
@@ -588,9 +589,10 @@ class MTLSegformerFinetuner(pl.LightningModule):
         pred_seed_to_fruit_ratio = self.get_seed_to_fruit_ratio(
             self.pred_pixel_density, 0)
 
+
         metrics = {"test_loss": avg_test_loss, "test_mean_iou": test_mean_iou,
                    "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse,
-                   "test_mean_mae": mae, "test_mean_corr": corr,
+                   "test_mean_mae": mae, "test_mean_corr": corr, 
                    "test_gt_seed_to_fruit_ratio": gt_seed_to_fruit_ratio,
                    "test_pred_seed_to_fruit_ratio": pred_seed_to_fruit_ratio}
         for i in self.id2label.keys():

@@ -10,6 +10,8 @@ for file in os.listdir(BASE_DIR):
     img = cv2.imread(f'{BASE_DIR}/{file}', cv2.IMREAD_GRAYSCALE)
     array_img = np.array(img)
     unique, counts = np.unique(array_img, return_counts=True)
+    print(np.where(unique == 205))
+    
     for pixel_val, count in zip(unique, counts):
         base_count[pixel_val] += count
 
