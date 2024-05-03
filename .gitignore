@@ -16,3 +16,6 @@ tmp/
 *__pycache__*
 Delete_Later/
 Segformer_and_MTL_Segformer/
+Riverside-runs/
+RiversideFrtInterior/
+Cross-valid/

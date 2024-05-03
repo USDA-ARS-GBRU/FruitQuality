@@ -1,3 +1,5 @@
+import pandas as pd
+from sklearn.model_selection import KFold
 from matplotlib import pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
@@ -20,41 +22,64 @@ import wandb
 import sys
 import random
 import yaml
+from collections import defaultdict
 
 from transformers.models.segformer.modeling_segformer import BCEWithLogitsLoss, CrossEntropyLoss, SegformerDecodeHead, SegformerModel, SegformerPreTrainedModel, SemanticSegmenterOutput, SegFormerImageClassifierOutput, MSELoss
 from typing import Optional, Tuple, Union
 from evaluate import load
 
-with open('./mtl_segformer_cnn.yaml') as file:
+with open('./mtl_segformer_cross_validation.yaml') as file:
     config = yaml.load(file, Loader=yaml.FullLoader)
 
 run = wandb.init(config=config)
+wandb_api = wandb.Api()
+
+
+def normalize_array(arr):
+    arr_sum = np.sum(arr)
+    normalized_arr = arr / arr_sum
+    return normalized_arr
 
 
 DATA_DIR = '/home/mresham/fruitQuality/exports_seeds/Images'
 MASK_DIR = '/home/mresham/fruitQuality/exports_seeds/Masks'
 SEED_DATA = '/home/mresham/fruitQuality/exports_seeds/'
 wandb_logger = WandbLogger(log_model=False, experiment=run)
-# wandb_logger = WandbLogger(project="Delete_Later", offline=True)
-# MODEL_BASE = "nvidia/segformer-b0-finetuned-ade-512-512"
-# EPOCHS = 1
+# wandb_logger = WandbLogger(experiment=run)
 MODEL_BASE = wandb.config.backbone
 EPOCHS = wandb.config.epochs
-CNN_HIDDEN_CHANNELS = wandb.config.cnn_hidden_channels
-WEIGHTS = [1, 1, 1, 1, 1]
-WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
-    device="cuda") if WEIGHTS != "None" else None
+# CNN_HIDDEN_CHANNELS = wandb.config.cnn_hidden_channels
+USE_CNN_BRANCH = False
+# if CNN_HIDDEN_CHANNELS == "None":
+#     USE_CNN_BRANCH = False
+WEIGHT = "None"
+MASK_TYPE = "None"
+if WEIGHT == "None" or MASK_TYPE == "None":
+    WEIGHTS = None
+elif wandb.config.weights != "None":
+    WEIGHTS = wandb.config.weights
+    WEIGHTS = normalize_array(WEIGHTS)
+else:
+    MASK_ORDER = ['seed', 'pulp', 'albedo', 'flavedo']
+    idx = MASK_ORDER.index(MASK_TYPE) + 1
+    WEIGHTS = np.array([1] * 5)
+    WEIGHTS[idx] = WEIGHT
+    WEIGHTS = normalize_array(WEIGHTS)
+    WEIGHTS = torch.tensor(WEIGHTS, dtype=torch.float32).to(
+        device="cuda") if WEIGHTS != "None" else None
 LOSS = "multi"
+PREPROCESS_SIZE = wandb.config.preprocess_size
+N_FOLDS = 10
 
-data_ids = [mask_id.split(".png")[0]
-            for mask_id in os.listdir(SEED_DATA + "Masks")]
+data_ids = sorted([mask_id.split(".png")[0]
+                   for mask_id in os.listdir(SEED_DATA + "Masks")])
 SIZE = len(data_ids)
 TRAIN_SIZE = int(0.6 * SIZE)
 VAL_SIZE = int(0.2 * SIZE)  # Also Test size
 CLASSES = list(reversed(['seed', 'pulp', 'albedo', 'flavedo']))
 
 batch_size = 8
-num_workers = 4
+num_workers = 4  # Ideal size for SUNNY server
 # Unsorted Image IDs
 image_ids = [
     "147",
@@ -76,6 +101,7 @@ image_ids = [
 #     "347"
 # ]
 
+
 class SemanticSegmentationDataset(Dataset):
     CLASSES = ['unlabelled', 'seed', 'pulp', 'albedo', 'flavedo']
 
@@ -89,7 +115,7 @@ class SemanticSegmentationDataset(Dataset):
             augmentation=None,
             preprocessing=None,
     ):
-        self.ids = ids
+        self.ids: list = ids
         # self.images_fps = [os.path.join(images_dir, image_id.replace(".png", ""))
 #                           for image_id in self.ids]
         self.images_fps = [os.path.join(
@@ -134,7 +160,7 @@ class SemanticSegmentationDataset(Dataset):
 
     def __len__(self):
         return len(self.ids)
-    
+
     def get_idx_of_img_id(self, img_id):
         try:
             return self.ids.index(img_id)
@@ -212,7 +238,7 @@ class CNNClassifier(nn.Module):
         self.n_cnn_block = n_cnn_block
         self.conv_blocks = self._make_conv_blocks(input_channels, hidden_sizes)
         self.fc_layers = self._make_fc_layers(
-            hidden_sizes[-1] * 4 * 4, output_classes) # 128 -> 4, 512 -> 16, input / 32
+            hidden_sizes[-1] * 4 * 4, output_classes)
 
     def _make_conv_blocks(self, input_channels, hidden_sizes):
         layers = []
@@ -237,13 +263,9 @@ class CNNClassifier(nn.Module):
         )
 
     def forward(self, x):
-        # print("CNN classifier forward")
-        # print(x.shape)
         x = self.conv_blocks(x)
-        # print(x.shape)
         x = self.fc_layers(x)
         return x
-
 
 class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(SegformerPreTrainedModel):
     def __init__(self, config):
@@ -255,25 +277,16 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
 
         # Classifier head
         self.clf_num_labels = 1
-        self.cnn_classifier = CNNClassifier(
-            self.config.hidden_sizes[-1], self.clf_num_labels, CNN_HIDDEN_CHANNELS, len(CNN_HIDDEN_CHANNELS))
-        # print(self.cnn_classifier.conv_blocks)
-        # print(self.cnn_classifier.fc_layers)
-        # self.classifier = nn.Sequential(nn.Conv2d(self.config.hidden_sizes[-1], 512, 1, 1, "same"),
-        #                                 nn.ReLU(),
-        #                                 nn.MaxPool2d(kernel_size=2),
-        #                                 nn.Conv2d(
-        #                                     512, 256, 1, 1, "same"),
-        #                                 nn.ReLU(),
-        #                                 nn.MaxPool2d(kernel_size=2),
-        #                                 nn.Flatten(),
-        #                                 nn.Linear(
-        #                                     256, 256),
-        #                                 nn.ReLU(),
-        #                                 nn.Linear(256, 128),
-        #                                 nn.ReLU(),
-        #                                 nn.Linear(128, self.clf_num_labels))
-        self.classifier = self.cnn_classifier
+        if USE_CNN_BRANCH:
+            self.cnn_classifier = CNNClassifier(
+                self.config.hidden_sizes[-1], self.clf_num_labels, CNN_HIDDEN_CHANNELS, len(CNN_HIDDEN_CHANNELS))
+            self.classifier = self.cnn_classifier
+        else:
+            self.classifier = nn.Sequential(nn.Linear(config.hidden_sizes[-1], 256),
+                                            nn.ReLU(),
+                                            nn.Linear(256, 128),
+                                            nn.ReLU(),
+                                            nn.Linear(128, self.clf_num_labels))
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -308,13 +321,14 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
         # convert last hidden states to (batch_size, height*width, hidden_size)
         batch_size = sequence_output.shape[0]
 
-        # if self.config.reshape_last_stage:
-        #     # (batch_size, num_channels, height, width) -> (batch_size, height, width, num_channels)
-        #     sequence_output = sequence_output.permute(0, 2, 3, 1)
-        # sequence_output = sequence_output.reshape(
-        #     batch_size, -1, self.config.hidden_sizes[-1])
-        # # global average pooling
-        # sequence_output = sequence_output.mean(dim=1)
+        if not USE_CNN_BRANCH:
+            if self.config.reshape_last_stage:
+                # (batch_size, num_channels, height, width) -> (batch_size, height, width, num_channels)
+                sequence_output = sequence_output.permute(0, 2, 3, 1)
+            sequence_output = sequence_output.reshape(
+                batch_size, -1, self.config.hidden_sizes[-1])
+            # global average pooling
+            sequence_output = sequence_output.mean(dim=1)
         cl_logits = self.classifier(sequence_output)
         cl_loss = None
         # Image classification stuff end
@@ -326,10 +340,12 @@ class SegformerWithDiceLossForSemanticSegmentationAndImageClassification(Segform
                 logits, size=labels.shape[-2:], mode="bilinear", align_corners=False
             )
             if self.config.num_labels > 1:
-                # loss_fct = CrossEntropyLoss(
-                #     ignore_index=self.config.semantic_loss_ignore_index)
-                loss_fct = FocalLoss_MulticlassDiceLoss(
-                    num_classes=5, weight=WEIGHTS, loss=LOSS)
+                if LOSS == 'cross-entropy':
+                    loss_fct = CrossEntropyLoss(
+                        ignore_index=self.config.semantic_loss_ignore_index)
+                else:
+                    loss_fct = FocalLoss_MulticlassDiceLoss(
+                        num_classes=5, weight=WEIGHTS, loss=LOSS)
                 loss = loss_fct(upsampled_logits, labels)
             elif self.config.num_labels == 1:
                 valid_mask = ((labels >= 0) & (
@@ -431,6 +447,9 @@ class MTLSegformerFinetuner(pl.LightningModule):
 
         self.validation_step_outputs = []
         self.test_step_outputs = []
+
+        self.gt_pixel_density = defaultdict(lambda: 0)
+        self.pred_pixel_density = defaultdict(lambda: 0)
 
     def forward(self, images, masks, seed_count):
         seg_outputs, clf_outputs = self.model(
@@ -576,10 +595,28 @@ class MTLSegformerFinetuner(pl.LightningModule):
             predictions=clf_logits.detach().cpu().numpy(),
             references=seed_count.detach().cpu().numpy()
         )
+        # Ground truth pixel density
+        pixel_labels = masks.detach().cpu().numpy()
+        unique, counts = np.unique(pixel_labels, return_counts=True)
+        for pixel_val, count in zip(unique, counts):
+            self.gt_pixel_density[pixel_val] += count
+        # Predicted pixel density
+        pixel_labels = predicted.detach().cpu().numpy()
+        unique, counts = np.unique(pixel_labels, return_counts=True)
+        for pixel_val, count in zip(unique, counts):
+            self.pred_pixel_density[pixel_val] += count
 
         self.test_step_outputs.append(total_loss)
 
         return ({'test_loss': total_loss})
+
+    def get_seed_to_fruit_ratio(self, pixel_density: dict, idx: int):
+        try:
+            return pixel_density.get(idx) / sum(pixel_density.values())
+        except TypeError as e:
+            print(e)
+            print(pixel_density, idx)
+            return None
 
     def on_test_epoch_end(self):
         outputs = self.test_step_outputs
@@ -596,10 +633,18 @@ class MTLSegformerFinetuner(pl.LightningModule):
         mse = self.test_mse.compute()['mse']
         mae = self.test_mae.compute()['mae']
         corr = self.test_corr.compute()['pearsonr']
+        # GT {0: Background, 4: Seed, 3: Pulp, 2: Albedo, 1: Flavedo}
+        gt_seed_to_fruit_ratio = self.get_seed_to_fruit_ratio(
+            self.gt_pixel_density, 4)
+        # Pred {4: Background, 0: Seed, 1: Pulp, 2: Albedo, 3: Flavedo}
+        pred_seed_to_fruit_ratio = self.get_seed_to_fruit_ratio(
+            self.pred_pixel_density, 0)
 
         metrics = {"test_loss": avg_test_loss, "test_mean_iou": test_mean_iou,
-                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse, 
-                   "test_mean_mae": mae, "test_mean_corr": corr}
+                   "test_mean_accuracy": test_mean_accuracy, "test_mean_mse": mse,
+                   "test_mean_mae": mae, "test_mean_corr": corr,
+                   "test_gt_seed_to_fruit_ratio": gt_seed_to_fruit_ratio,
+                   "test_pred_seed_to_fruit_ratio": pred_seed_to_fruit_ratio}
         for i in self.id2label.keys():
             metrics[f"test_{self.id2label[i]}_iou"] = test_per_category_iou[i]
 
@@ -607,6 +652,8 @@ class MTLSegformerFinetuner(pl.LightningModule):
             self.log(k, v, prog_bar=True)
 
         self.test_step_outputs.clear()
+        self.gt_pixel_density.clear()
+        self.pred_pixel_density.clear()
 
         return metrics
 
@@ -626,162 +673,90 @@ class MTLSegformerFinetuner(pl.LightningModule):
 feature_extractor = SegformerFeatureExtractor.from_pretrained(
     MODEL_BASE)
 feature_extractor.reduce_labels = False
-feature_extractor.size = 128
+feature_extractor.size = PREPROCESS_SIZE
+
+folds = KFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+splits = folds.split(data_ids)
+cv_data = []
+
+for i, (train_set, test_set) in enumerate(splits):
+    train_set = [data_ids[x] for x in train_set]
+    test_set = [data_ids[x] for x in test_set]
+    validation_size = int(0.3 * len(train_set))
+
+    train_dataset = SemanticSegmentationDataset(
+        train_set[:-validation_size],
+        DATA_DIR,
+        MASK_DIR,
+        classes=CLASSES,
+        feature_extractor=feature_extractor,
+    )
+    val_dataset = SemanticSegmentationDataset(
+        train_set[-validation_size:],
+        DATA_DIR,
+        MASK_DIR,
+        classes=CLASSES,
+        feature_extractor=feature_extractor,
+    )
+    test_dataset = SemanticSegmentationDataset(
+        test_set,
+        DATA_DIR,
+        MASK_DIR,
+        classes=CLASSES,
+        feature_extractor=feature_extractor,
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=batch_size, num_workers=num_workers)
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=batch_size, num_workers=num_workers)
+
+    mtl_segformer_finetuner = MTLSegformerFinetuner(
+        train_dataset.id2label,
+        train_dataloader=train_dataloader,
+        val_dataloader=val_dataloader,
+        test_dataloader=test_dataloader,
+        metrics_interval=10,
+    )
+
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss",
+        min_delta=0.00,
+        patience=10,
+        verbose=False,
+        mode="min",
+    )
+
+    checkpoint_callback = ModelCheckpoint(save_top_k=1, monitor="val_loss")
+
+    trainer = pl.Trainer(
+        accelerator='gpu',
+        callbacks=[checkpoint_callback],
+        max_epochs=EPOCHS,
+        logger=wandb_logger,
+        val_check_interval=len(train_dataloader),
+        log_every_n_steps=1
+    )
+    wandb_logger.experiment.config.update(
+        {"model": MODEL_BASE, "k-fold": N_FOLDS})
+
+    trainer.fit(mtl_segformer_finetuner)
+
+    res = trainer.test(ckpt_path="best")
+
+experiment: wandb.wandb_sdk.wandb_run.Run = wandb_logger.experiment
+experiment.finish()
+run: wandb.apis.public.Run = wandb_api.run(wandb_logger.experiment.path)
 
 
-train_dataset = SemanticSegmentationDataset(
-    data_ids[:TRAIN_SIZE],
-    DATA_DIR,
-    MASK_DIR,
-    classes=CLASSES,
-    feature_extractor=feature_extractor,
-)
-val_dataset = SemanticSegmentationDataset(
-    data_ids[TRAIN_SIZE:TRAIN_SIZE+VAL_SIZE],
-    DATA_DIR,
-    MASK_DIR,
-    classes=CLASSES,
-    feature_extractor=feature_extractor,
-)
-test_dataset = SemanticSegmentationDataset(
-    data_ids[TRAIN_SIZE+VAL_SIZE:],
-    DATA_DIR,
-    MASK_DIR,
-    classes=CLASSES,
-    feature_extractor=feature_extractor,
-)
+def cv_score_from_test_scores(run: wandb.apis.public.Run, key):
+    test_scores: pd.DataFrame = run.history(keys=[f"test_{key}"])
+    run.summary[f"cv_{key}"] = test_scores[f"test_{key}"].mean()
 
 
-train_dataloader = DataLoader(
-    train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-val_dataloader = DataLoader(
-    val_dataset, batch_size=batch_size, num_workers=num_workers)
-test_dataloader = DataLoader(
-    test_dataset, batch_size=batch_size, num_workers=num_workers)
+for metric in ["mean_iou", "mean_mae", "mean_mse", "mean_corr"]:
+    cv_score_from_test_scores(run, metric)
 
-mtl_segformer_finetuner = MTLSegformerFinetuner(
-    train_dataset.id2label,
-    train_dataloader=train_dataloader,
-    val_dataloader=val_dataloader,
-    test_dataloader=test_dataloader,
-    metrics_interval=10,
-)
-
-
-early_stop_callback = EarlyStopping(
-    monitor="val_loss",
-    min_delta=0.00,
-    patience=10,
-    verbose=False,
-    mode="min",
-)
-
-checkpoint_callback = ModelCheckpoint(save_top_k=1, monitor="val_loss")
-
-trainer = pl.Trainer(
-    accelerator='gpu',
-    callbacks=[checkpoint_callback],
-    max_epochs=EPOCHS,
-    logger=wandb_logger,
-    val_check_interval=len(train_dataloader),
-    log_every_n_steps=1
-)
-wandb_logger.experiment.config.update({"model": MODEL_BASE})
-
-trainer.fit(mtl_segformer_finetuner)
-
-
-res = trainer.test(ckpt_path="best")
-
-mtl_segformer_finetuner = mtl_segformer_finetuner.to(device="cuda")
-
-
-def run_sample_output(img_id):
-    idx_in_test_set = test_dataset.get_idx_of_img_id(img_id)
-    if idx_in_test_set == -1:
-        return None
-    dataset_image = test_dataset.get_image(idx_in_test_set)
-    encoded_inputs = test_dataset[idx_in_test_set]
-    images, masks, seed_count = encoded_inputs['pixel_values'], encoded_inputs['labels'], encoded_inputs['seedCount']
-    # outputs = segformer_finetuner.model(images.unsqueeze(0), masks.unsqueeze(0))
-    images, masks, seed_count = images.to(device="cuda"), masks.to(
-        device="cuda"), seed_count.to(device="cuda")
-    seg_outputs, clf_outputs = mtl_segformer_finetuner.model(
-        images.unsqueeze(0), masks.unsqueeze(0), seed_count.unsqueeze(0))
-
-    _, logits = seg_outputs[0], seg_outputs[1]
-    _, clf_logits = clf_outputs[0], clf_outputs[1]
-
-    # Seed Count outputs
-    my_data = [img_id,
-               str(seed_count.detach().cpu().numpy()),
-               str(clf_logits.detach().cpu().numpy())]
-
-    # Mask outptus
-    # First, rescale logits to original image size
-    upsampled_logits = nn.functional.interpolate(logits,
-                                                 # (height, width)
-                                                 size=dataset_image.size[::-1],
-                                                 mode='bilinear',
-                                                 align_corners=False)
-
-    # Second, apply argmax on the class dimension
-    seg = upsampled_logits.argmax(dim=1).cpu().numpy()[0]
-
-    # wandb_image = wandb.Image(dataset_image, caption="Input image")
-    wandb_logger.log_image(
-        img_id, [dataset_image], caption=["Input image"])
-
-    # Change pixel order to be seed, pulp, albedo, flavedo, background
-    ground_truth_mask = (
-        np.array(test_dataset.get_mask(idx_in_test_set)) // 51)
-    tmp_gt_mask = ground_truth_mask + 10
-    # Dont change order here
-    tmp_gt_mask = np.where(tmp_gt_mask == 10, 4, tmp_gt_mask)
-    tmp_gt_mask = np.where(tmp_gt_mask == 14, 0, tmp_gt_mask)
-    tmp_gt_mask = np.where(tmp_gt_mask == 13, 1, tmp_gt_mask)
-    tmp_gt_mask = np.where(tmp_gt_mask == 12, 2, tmp_gt_mask)
-    tmp_gt_mask = np.where(tmp_gt_mask == 11, 3, tmp_gt_mask)
-    ground_truth_mask = tmp_gt_mask
-    wandb_logger.log_image(img_id, [dataset_image], caption=["True Masks"],
-                           masks=[{
-                               "ground_truth": {
-                                   "mask_data": ground_truth_mask.squeeze(),
-                                   "class_labels": {4: "Background",
-                                                    0: "Seed",
-                                                    1: "Pulp",
-                                                    2: "Albedo",
-                                                    3: "Flavedo"
-                                                    }
-                               }}
-    ])
-
-    # Change pixel order to be Background, seed, pulp, albedo, flavedo
-    # tmp_seg = seg + 1
-    # seg = np.where(tmp_seg == 5, 0, tmp_seg)
-    wandb_logger.log_image(img_id, [dataset_image], caption=["Predicted Masks"],
-                           masks=[{
-                               "predicted_mask": {
-                                   "mask_data": seg.squeeze(),
-                                   "class_labels": {
-                                       0: "Seed",
-                                       1: "Pulp",
-                                       2: "Albedo",
-                                       3: "Flavedo",
-                                       4: "Background",
-                                   }
-                               }}
-    ])
-
-    return my_data
-
-
-columns = ["image id", "seed label", "seed prediction"]
-seed_count_data = []
-for img_id in image_ids:
-    seed_data = run_sample_output(img_id)
-    if seed_data:
-        seed_count_data.append(seed_data)
-
-# using columns and data
-wandb_logger.log_text(key="Seed Count", columns=columns, data=seed_count_data)
+run.update()
